@@ -1,0 +1,16 @@
+{
+  "name": "cfs-crm",
+  "version": "1.0.0",
+  "description": "CFS Flooring Sales CRM — accounts, contacts, projects, and contact-cadence reminders.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed:demo": "node server.js --seed-demo",
+    "test": "node test/api.test.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
