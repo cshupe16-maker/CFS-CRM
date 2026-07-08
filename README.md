@@ -50,7 +50,34 @@ Any Node host works ([Render](https://render.com), [Railway](https://railway.app
 
 - Start command: `node server.js` (the host's `PORT` env var is respected automatically).
 - Make sure the host gives you a **persistent disk**, and set `DATA_DIR` to a folder on it (e.g. `DATA_DIR=/var/data`) — otherwise your database resets on every deploy.
-- Sign-in is required for all data, but put it behind **HTTPS** (Render/Railway/Fly do this automatically) so passwords aren't sent in the clear over the public internet.
+- Sign-in is required for all data, but put it behind **HTTPS** (managed hosts do this automatically) so passwords aren't sent in the clear over the public internet.
+
+### Deploying to Google Cloud Run
+
+Cloud Run gives you HTTPS and a public URL automatically. Its filesystem is wiped on every restart, so the database is kept in a **Cloud Storage bucket mounted as a volume**. From [Cloud Shell](https://shell.cloud.google.com) (or a machine with the `gcloud` CLI), inside the repo folder:
+
+```bash
+# one-time setup
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com storage.googleapis.com
+gcloud storage buckets create gs://YOUR_PROJECT_ID-cfs-crm-data --location=us-central1
+gcloud storage buckets update gs://YOUR_PROJECT_ID-cfs-crm-data --versioning   # automatic backups
+
+# deploy (rerun this same command for every update)
+gcloud run deploy cfs-crm --source . --region us-central1 \
+  --allow-unauthenticated --max-instances 1 \
+  --add-volume name=crm-data,type=cloud-storage,bucket=YOUR_PROJECT_ID-cfs-crm-data \
+  --add-volume-mount volume=crm-data,mount-path=/data \
+  --set-env-vars DATA_DIR=/data
+```
+
+The deploy prints your `https://…run.app` URL. Notes:
+
+- `--max-instances 1` is **required** — the app keeps its database in one process, so it must not scale to multiple copies.
+- `--allow-unauthenticated` makes the URL reachable; the app's own email/password login still protects all data.
+- The bucket holds `db.json`; with versioning on, old versions are kept automatically. Download a copy anytime: `gcloud storage cp gs://YOUR_PROJECT_ID-cfs-crm-data/db.json backup.json`.
+- With no minimum instances the service scales to zero when idle (essentially free); if the first load of the day feels slow, add `--min-instances 1` (~$10–15/mo).
 
 ## Using the CRM
 

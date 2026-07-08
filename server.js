@@ -109,9 +109,17 @@ function loadDb() {
 }
 
 function saveDb() {
+  const json = JSON.stringify(db, null, 2);
   const tmp = DB_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-  fs.renameSync(tmp, DB_FILE);
+  try {
+    fs.writeFileSync(tmp, json);
+    fs.renameSync(tmp, DB_FILE); // atomic on normal filesystems
+  } catch (e) {
+    // Mounted object storage (e.g. Cloud Storage FUSE on Cloud Run) may not
+    // support rename — write the file directly instead.
+    fs.writeFileSync(DB_FILE, json);
+    try { fs.unlinkSync(tmp); } catch (e2) { /* tmp may not exist */ }
+  }
 }
 
 const nextId = list => list.reduce((m, x) => Math.max(m, x.id), 0) + 1;
@@ -499,13 +507,17 @@ async function handleApi(req, res, pathname) {
   if (method === 'GET' && pathname === '/api/login-info') {
     return ok(res, { demo: !!(db.meta && db.meta.demo) });
   }
+  // mark cookies Secure when behind an HTTPS proxy (Cloud Run, Render, etc.)
+  const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+
   if (method === 'POST' && pathname === '/api/login') {
-    const ip = req.socket.remoteAddress || '?';
+    const ip = req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim()
+      : (req.socket.remoteAddress || '?');
     const result = handleLogin(body, ip);
     if (result.error) return bad(res, result.error);
     return ok(res, { user: result.user }, {
       'Set-Cookie': 'session=' + result.token +
-        '; HttpOnly; Path=/; SameSite=Lax; Max-Age=' + Math.floor(SESSION_TTL / 1000),
+        '; HttpOnly; Path=/; SameSite=Lax; Max-Age=' + Math.floor(SESSION_TTL / 1000) + secure,
     });
   }
 
@@ -515,7 +527,7 @@ async function handleApi(req, res, pathname) {
 
   if (method === 'POST' && pathname === '/api/logout') {
     handleLogout(req);
-    return ok(res, { ok: true }, { 'Set-Cookie': 'session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' });
+    return ok(res, { ok: true }, { 'Set-Cookie': 'session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' + secure });
   }
   if (method === 'POST' && pathname === '/api/me/password') return respond(changeOwnPassword(user, body));
   if (method === 'GET' && pathname === '/api/data') return ok(res, getData(user));
