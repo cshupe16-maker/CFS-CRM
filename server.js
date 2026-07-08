@@ -6,6 +6,8 @@
  * Zero-dependency Node.js HTTP server:
  *   - serves the single-page app from /public
  *   - JSON REST API under /api
+ *   - password login with cookie sessions (salted scrypt hashes)
+ *   - role-based permissions enforced server-side
  *   - persists everything to data/db.json (atomic writes)
  *
  * Run:  node server.js          (http://localhost:3000)
@@ -15,6 +17,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { demoData } = require('./seed');
 
 const PORT = process.env.PORT || 3000;
@@ -27,6 +30,53 @@ const ACCOUNT_TYPES = ['Builder', 'General Contractor', 'Designer', 'Property Ma
 const PROJECT_STATUSES = ['In Progress', 'Completed', 'Archive'];
 const ROLES = ['Owner', 'Manager', 'Sales'];
 const CADENCES = [7, 14, 30, 60, 90];
+
+const SESSION_TTL = 30 * 24 * 3600 * 1000; // 30 days
+const DEFAULT_PASSWORD = 'welcome1';       // seeded users; change in Settings
+const MIN_PASSWORD = 8;
+
+// ---------- passwords & sessions ----------
+
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return salt + ':' + crypto.scryptSync(pw, salt, 64).toString('hex');
+}
+
+function verifyPassword(pw, stored) {
+  if (!stored || typeof pw !== 'string') return false;
+  const [salt, hash] = stored.split(':');
+  if (!salt || !hash) return false;
+  const test = crypto.scryptSync(pw, salt, 64);
+  const orig = Buffer.from(hash, 'hex');
+  return test.length === orig.length && crypto.timingSafeEqual(test, orig);
+}
+
+function pruneSessions() {
+  const cutoff = Date.now() - SESSION_TTL;
+  db.sessions = (db.sessions || []).filter(s => s.created > cutoff);
+}
+
+function userFromRequest(req) {
+  const match = /(?:^|;\s*)session=([a-f0-9]{64})/.exec(req.headers.cookie || '');
+  if (!match) return null;
+  const sess = (db.sessions || []).find(s => s.token === match[1]);
+  if (!sess || Date.now() - sess.created > SESSION_TTL) return null;
+  const user = db.users.find(u => u.id === sess.userId);
+  return user && user.active !== false ? user : null;
+}
+
+// naive brute-force throttle: 10 failures per address locks login for 15 min
+const loginFails = new Map();
+function loginLocked(ip) {
+  const f = loginFails.get(ip);
+  return f && f.count >= 10 && Date.now() < f.until;
+}
+function recordLoginFail(ip) {
+  const f = loginFails.get(ip) || { count: 0, until: 0 };
+  f.count++;
+  f.until = Date.now() + 15 * 60 * 1000;
+  loginFails.set(ip, f);
+}
 
 // ---------- storage ----------
 
@@ -46,9 +96,16 @@ function loadDb() {
   } else {
     db = JSON.parse(JSON.stringify(demoData));
     db.meta = { demo: true, createdAt: new Date().toISOString() };
-    saveDb();
     console.log('First run: seeded demo data into ' + DB_FILE);
   }
+  // migrations: give pre-auth databases passwords, active flags, sessions
+  db.sessions = db.sessions || [];
+  db.users.forEach(u => {
+    if (!u.passHash) u.passHash = hashPassword(DEFAULT_PASSWORD);
+    if (u.active === undefined) u.active = true;
+  });
+  pruneSessions();
+  saveDb();
 }
 
 function saveDb() {
@@ -61,17 +118,19 @@ const nextId = list => list.reduce((m, x) => Math.max(m, x.id), 0) + 1;
 
 // ---------- helpers ----------
 
-function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
+function sendJson(res, status, obj, headers) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    ...(headers || {}),
   });
-  res.end(body);
+  res.end(JSON.stringify(obj));
 }
 
-const ok = (res, obj) => sendJson(res, 200, obj || { ok: true });
+const ok = (res, obj, headers) => sendJson(res, 200, obj || { ok: true }, headers);
 const bad = (res, msg) => sendJson(res, 400, { error: msg });
+const unauthorized = res => sendJson(res, 401, { error: 'Not signed in' });
+const forbidden = (res, msg) => sendJson(res, 403, { error: msg || 'You don’t have permission to do that.' });
 const notFound = res => sendJson(res, 404, { error: 'Not found' });
 
 function readBody(req) {
@@ -92,15 +151,86 @@ function readBody(req) {
 const str = v => (typeof v === 'string' ? v.trim() : '');
 const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
+const isManager = user => user.role === 'Owner' || user.role === 'Manager';
+const publicUser = u => ({ id: u.id, name: u.name, role: u.role, email: u.email, active: u.active !== false });
+
+// Sales reps may only touch accounts assigned to them
+const canAccessAccount = (user, acc) => isManager(user) || acc.rep === user.id;
+
+function checkPassword(pw) {
+  if (typeof pw !== 'string' || pw.length < MIN_PASSWORD)
+    return 'Password must be at least ' + MIN_PASSWORD + ' characters.';
+  return null;
+}
+
+// ---------- auth handlers ----------
+
+function handleLogin(body, ip) {
+  if (loginLocked(ip)) return { error: 'Too many failed attempts. Try again in 15 minutes.' };
+  const email = str(body.email).toLowerCase();
+  const user = db.users.find(u => u.email.toLowerCase() === email);
+  if (!user || user.active === false || !verifyPassword(body.password, user.passHash)) {
+    recordLoginFail(ip);
+    return { error: 'Wrong email or password.' };
+  }
+  loginFails.delete(ip);
+  const token = crypto.randomBytes(32).toString('hex');
+  pruneSessions();
+  db.sessions.push({ token, userId: user.id, created: Date.now() });
+  saveDb();
+  return { user: publicUser(user), token };
+}
+
+function handleLogout(req) {
+  const match = /(?:^|;\s*)session=([a-f0-9]{64})/.exec(req.headers.cookie || '');
+  if (match) {
+    db.sessions = db.sessions.filter(s => s.token !== match[1]);
+    saveDb();
+  }
+  return { ok: true };
+}
+
+function changeOwnPassword(user, body) {
+  if (!verifyPassword(body.current, user.passHash))
+    return { error: 'Current password is incorrect.' };
+  const weak = checkPassword(body.password);
+  if (weak) return { error: weak };
+  user.passHash = hashPassword(body.password);
+  // keep this session, sign out everywhere else
+  saveDb();
+  return { ok: true };
+}
+
 // ---------- API handlers ----------
 
-function createAccount(body) {
+function getData(user) {
+  const accounts = isManager(user) ? db.accounts : db.accounts.filter(a => a.rep === user.id);
+  const accIds = new Set(accounts.map(a => a.id));
+  return {
+    me: publicUser(user),
+    users: db.users.map(publicUser),
+    accounts,
+    contacts: db.contacts.filter(c => accIds.has(c.acc)),
+    projects: db.projects.filter(p => accIds.has(p.acc)),
+    mfrs: db.mfrs,
+    meta: { demo: !!(db.meta && db.meta.demo) },
+    today: todayISO(),
+  };
+}
+
+function createAccount(user, body) {
   const name = str(body.name);
   if (!name) return { error: 'Enter an account name.' };
   if (db.accounts.some(a => a.name.toLowerCase() === name.toLowerCase()))
     return { error: 'An account with that name already exists.' };
+  let rep = +body.rep;
+  if (!isManager(user)) {
+    if (rep && rep !== user.id) return { forbidden: 'Sales reps can only assign new accounts to themselves.' };
+    rep = user.id;
+  } else if (!db.users.some(u => u.id === rep)) {
+    return { error: 'Pick an assigned rep.' };
+  }
   const type = ACCOUNT_TYPES.includes(body.type) ? body.type : 'Other';
-  const rep = db.users.some(u => u.id === +body.rep) ? +body.rep : null;
   const cadence = CADENCES.includes(+body.cadence) ? +body.cadence : 30;
   const account = {
     id: nextId(db.accounts), name, type, rep, cadence,
@@ -111,9 +241,10 @@ function createAccount(body) {
   return { account };
 }
 
-function patchAccount(id, body) {
+function patchAccount(user, id, body) {
   const a = db.accounts.find(x => x.id === id);
   if (!a) return { notFound: true };
+  if (!canAccessAccount(user, a)) return { forbidden: true };
   if (body.name !== undefined) {
     const name = str(body.name);
     if (!name) return { error: 'Enter an account name.' };
@@ -124,7 +255,7 @@ function patchAccount(id, body) {
   if (body.type !== undefined && ACCOUNT_TYPES.includes(body.type)) a.type = body.type;
   if (body.rep !== undefined) {
     if (!db.users.some(u => u.id === +body.rep)) return { error: 'Unknown rep.' };
-    a.rep = +body.rep;
+    a.rep = +body.rep; // a rep handing an account to a teammate is allowed
   }
   if (body.cadence !== undefined) {
     if (!CADENCES.includes(+body.cadence)) return { error: 'Invalid cadence.' };
@@ -139,20 +270,22 @@ function patchAccount(id, body) {
   return { account: a };
 }
 
-function logContact(id) {
+function logContact(user, id) {
   const a = db.accounts.find(x => x.id === id);
   if (!a) return { notFound: true };
+  if (!canAccessAccount(user, a)) return { forbidden: true };
   a.lastContact = todayISO();
   db.contacts.forEach(c => { if (c.acc === id && c.primary) c.lastContact = todayISO(); });
   saveDb();
   return { account: a };
 }
 
-function createContact(body) {
+function createContact(user, body) {
   const name = str(body.name);
   if (!name) return { error: 'Enter a name.' };
   const acc = db.accounts.find(a => a.id === +body.acc);
   if (!acc) return { error: 'Unknown account.' };
+  if (!canAccessAccount(user, acc)) return { forbidden: true };
   const contact = {
     id: nextId(db.contacts), acc: acc.id, name,
     title: str(body.title), email: str(body.email), phone: str(body.phone),
@@ -165,9 +298,11 @@ function createContact(body) {
   return { contact };
 }
 
-function patchContact(id, body) {
+function patchContact(user, id, body) {
   const c = db.contacts.find(x => x.id === id);
   if (!c) return { notFound: true };
+  const acc = db.accounts.find(a => a.id === c.acc);
+  if (!acc || !canAccessAccount(user, acc)) return { forbidden: true };
   if (body.name !== undefined) {
     const name = str(body.name);
     if (!name) return { error: 'Enter a name.' };
@@ -211,79 +346,129 @@ function projectFields(body) {
   };
 }
 
-function registerMfrs(names) {
-  names.forEach(name => {
-    if (!db.mfrs.some(m => m.toLowerCase() === name.toLowerCase())) db.mfrs.push(name);
-  });
+// Only managers/owners may introduce NEW manufacturer names via a project save
+function registerMfrs(user, names) {
+  const unknown = names.filter(n => !db.mfrs.some(m => m.toLowerCase() === n.toLowerCase()));
+  if (unknown.length && !isManager(user))
+    return 'Only managers/owners can add manufacturers: ' + unknown.join(', ');
+  unknown.forEach(n => db.mfrs.push(n));
+  return null;
 }
 
-function createProject(body) {
+function createProject(user, body) {
   const error = validateProject(body);
   if (error) return { error };
+  const a = db.accounts.find(x => x.id === +body.acc);
+  if (!canAccessAccount(user, a)) return { forbidden: true };
   const fields = projectFields(body);
-  registerMfrs(fields.mfrs);
+  const mfrErr = registerMfrs(user, fields.mfrs);
+  if (mfrErr) return { forbidden: mfrErr };
   const project = { id: nextId(db.projects), ...fields };
   db.projects.push(project);
   // Saving a job also counts as a contact touch on the account
-  const a = db.accounts.find(x => x.id === project.acc);
   a.lastContact = todayISO();
   db.contacts.forEach(c => { if (c.acc === a.id && c.primary) c.lastContact = todayISO(); });
   saveDb();
   return { project };
 }
 
-function patchProject(id, body) {
+function patchProject(user, id, body) {
   const p = db.projects.find(x => x.id === id);
   if (!p) return { notFound: true };
+  const current = db.accounts.find(a => a.id === p.acc);
+  if (!current || !canAccessAccount(user, current)) return { forbidden: true };
   const merged = { ...p, ...body };
   const error = validateProject(merged);
   if (error) return { error };
-  Object.assign(p, projectFields(merged));
-  registerMfrs(p.mfrs);
+  const target = db.accounts.find(a => a.id === +merged.acc);
+  if (!canAccessAccount(user, target)) return { forbidden: true };
+  const fields = projectFields(merged);
+  const mfrErr = registerMfrs(user, fields.mfrs);
+  if (mfrErr) return { forbidden: mfrErr };
+  Object.assign(p, fields);
   saveDb();
   return { project: p };
 }
 
-function createMfr(body) {
+function createMfr(user, body) {
+  if (!isManager(user)) return { forbidden: 'Only managers/owners can add manufacturers.' };
   const name = str(body.name);
   if (!name) return { error: 'Enter a manufacturer name.' };
-  registerMfrs([name]);
+  if (!db.mfrs.some(m => m.toLowerCase() === name.toLowerCase())) db.mfrs.push(name);
   saveDb();
-  const canonical = db.mfrs.find(m => m.toLowerCase() === name.toLowerCase());
-  return { mfr: canonical };
+  return { mfr: db.mfrs.find(m => m.toLowerCase() === name.toLowerCase()) };
 }
 
-function createUser(body) {
+// ----- team management -----
+// Owners manage everyone. Managers manage the team but cannot touch Owner
+// accounts or grant the Owner role.
+
+function createUser(user, body) {
+  if (!isManager(user)) return { forbidden: true };
   const name = str(body.name);
   if (!name) return { error: 'Enter a name.' };
+  const email = str(body.email).toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'Enter a valid email — it’s the sign-in name.' };
+  if (db.users.some(u => u.email.toLowerCase() === email)) return { error: 'A team member with that email already exists.' };
   const role = ROLES.includes(body.role) ? body.role : 'Sales';
-  const user = { id: nextId(db.users), name, role, email: str(body.email) };
-  db.users.push(user);
+  if (role === 'Owner' && user.role !== 'Owner') return { forbidden: 'Only an owner can add another owner.' };
+  const weak = checkPassword(body.password);
+  if (weak) return { error: weak };
+  const nu = { id: nextId(db.users), name, role, email, active: true, passHash: hashPassword(body.password) };
+  db.users.push(nu);
   saveDb();
-  return { user };
+  return { user: publicUser(nu) };
 }
 
-function patchUser(id, body) {
+function patchUser(user, id, body) {
+  if (!isManager(user)) return { forbidden: true };
   const u = db.users.find(x => x.id === id);
   if (!u) return { notFound: true };
+  if (u.role === 'Owner' && user.role !== 'Owner')
+    return { forbidden: 'Only an owner can edit an owner’s profile.' };
+
   if (body.name !== undefined) {
     const name = str(body.name);
     if (!name) return { error: 'Enter a name.' };
     u.name = name;
   }
-  if (body.email !== undefined) u.email = str(body.email);
-  if (body.role !== undefined) {
+  if (body.email !== undefined) {
+    const email = str(body.email).toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'Enter a valid email — it’s the sign-in name.' };
+    if (db.users.some(x => x.id !== id && x.email.toLowerCase() === email))
+      return { error: 'A team member with that email already exists.' };
+    u.email = email;
+  }
+  if (body.role !== undefined && body.role !== u.role) {
     if (!ROLES.includes(body.role)) return { error: 'Invalid role.' };
+    if (body.role === 'Owner' && user.role !== 'Owner')
+      return { forbidden: 'Only an owner can grant the Owner role.' };
     if (u.role !== 'Sales' && body.role === 'Sales' &&
-        !db.users.some(x => x.id !== u.id && x.role !== 'Sales'))
-      return { error: 'At least one owner or manager is required.' };
+        !db.users.some(x => x.id !== u.id && x.role !== 'Sales' && x.active !== false))
+      return { error: 'At least one active owner or manager is required.' };
     u.role = body.role;
   }
+  if (body.active !== undefined) {
+    const active = !!body.active;
+    if (!active && u.id === user.id) return { error: 'You can’t disable your own sign-in.' };
+    if (!active && u.role !== 'Sales' &&
+        !db.users.some(x => x.id !== u.id && x.role !== 'Sales' && x.active !== false))
+      return { error: 'At least one active owner or manager is required.' };
+    u.active = active;
+    if (!active) db.sessions = db.sessions.filter(s => s.userId !== u.id); // sign them out
+  }
+  if (body.password !== undefined && body.password !== '') {
+    const weak = checkPassword(body.password);
+    if (weak) return { error: weak };
+    u.passHash = hashPassword(body.password);
+    db.sessions = db.sessions.filter(s => s.userId !== u.id || u.id === user.id);
+  }
   saveDb();
-  return { user: u };
+  return { user: publicUser(u) };
 }
 
-function clearDemo() {
+function clearDemo(user) {
+  if (user.role !== 'Owner') return { forbidden: 'Only an owner can clear demo data.' };
   db.accounts = [];
   db.contacts = [];
   db.projects = [];
@@ -303,40 +488,57 @@ async function handleApi(req, res, pathname) {
   }
 
   const respond = result => {
-    if (!result) return notFound(res);
-    if (result.notFound) return notFound(res);
+    if (!result || result.notFound) return notFound(res);
+    if (result.forbidden) return forbidden(res, typeof result.forbidden === 'string' ? result.forbidden : undefined);
     if (result.error) return bad(res, result.error);
     return ok(res, result);
   };
 
-  if (method === 'GET' && pathname === '/api/data') {
-    return ok(res, {
-      users: db.users, accounts: db.accounts, contacts: db.contacts,
-      projects: db.projects, mfrs: db.mfrs, meta: db.meta || {},
-      today: todayISO(),
+  // --- public endpoints ---
+  if (method === 'GET' && pathname === '/api/health') return ok(res, { ok: true });
+  if (method === 'GET' && pathname === '/api/login-info') {
+    return ok(res, { demo: !!(db.meta && db.meta.demo) });
+  }
+  if (method === 'POST' && pathname === '/api/login') {
+    const ip = req.socket.remoteAddress || '?';
+    const result = handleLogin(body, ip);
+    if (result.error) return bad(res, result.error);
+    return ok(res, { user: result.user }, {
+      'Set-Cookie': 'session=' + result.token +
+        '; HttpOnly; Path=/; SameSite=Lax; Max-Age=' + Math.floor(SESSION_TTL / 1000),
     });
   }
-  if (method === 'GET' && pathname === '/api/health') return ok(res, { ok: true });
+
+  // --- everything else requires a signed-in user ---
+  const user = userFromRequest(req);
+  if (!user) return unauthorized(res);
+
+  if (method === 'POST' && pathname === '/api/logout') {
+    handleLogout(req);
+    return ok(res, { ok: true }, { 'Set-Cookie': 'session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' });
+  }
+  if (method === 'POST' && pathname === '/api/me/password') return respond(changeOwnPassword(user, body));
+  if (method === 'GET' && pathname === '/api/data') return ok(res, getData(user));
 
   if (seg[1] === 'accounts') {
-    if (method === 'POST' && seg.length === 2) return respond(createAccount(body));
-    if (seg.length === 3 && method === 'PATCH') return respond(patchAccount(+seg[2], body));
-    if (seg.length === 4 && seg[3] === 'log-contact' && method === 'POST') return respond(logContact(+seg[2]));
+    if (method === 'POST' && seg.length === 2) return respond(createAccount(user, body));
+    if (seg.length === 3 && method === 'PATCH') return respond(patchAccount(user, +seg[2], body));
+    if (seg.length === 4 && seg[3] === 'log-contact' && method === 'POST') return respond(logContact(user, +seg[2]));
   }
   if (seg[1] === 'contacts') {
-    if (method === 'POST' && seg.length === 2) return respond(createContact(body));
-    if (seg.length === 3 && method === 'PATCH') return respond(patchContact(+seg[2], body));
+    if (method === 'POST' && seg.length === 2) return respond(createContact(user, body));
+    if (seg.length === 3 && method === 'PATCH') return respond(patchContact(user, +seg[2], body));
   }
   if (seg[1] === 'projects') {
-    if (method === 'POST' && seg.length === 2) return respond(createProject(body));
-    if (seg.length === 3 && method === 'PATCH') return respond(patchProject(+seg[2], body));
+    if (method === 'POST' && seg.length === 2) return respond(createProject(user, body));
+    if (seg.length === 3 && method === 'PATCH') return respond(patchProject(user, +seg[2], body));
   }
-  if (seg[1] === 'mfrs' && method === 'POST' && seg.length === 2) return respond(createMfr(body));
+  if (seg[1] === 'mfrs' && method === 'POST' && seg.length === 2) return respond(createMfr(user, body));
   if (seg[1] === 'users') {
-    if (method === 'POST' && seg.length === 2) return respond(createUser(body));
-    if (seg.length === 3 && method === 'PATCH') return respond(patchUser(+seg[2], body));
+    if (method === 'POST' && seg.length === 2) return respond(createUser(user, body));
+    if (seg.length === 3 && method === 'PATCH') return respond(patchUser(user, +seg[2], body));
   }
-  if (pathname === '/api/admin/clear-demo' && method === 'POST') return respond(clearDemo());
+  if (pathname === '/api/admin/clear-demo' && method === 'POST') return respond(clearDemo(user));
 
   return notFound(res);
 }
@@ -389,6 +591,8 @@ loadDb();
 if (process.argv.includes('--seed-demo')) {
   db = JSON.parse(JSON.stringify(demoData));
   db.meta = { demo: true, createdAt: new Date().toISOString() };
+  db.sessions = [];
+  db.users.forEach(u => { u.passHash = hashPassword(DEFAULT_PASSWORD); u.active = true; });
   saveDb();
   console.log('Re-seeded demo data.');
   process.exit(0);

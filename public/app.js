@@ -10,8 +10,9 @@
 
 const state = {
   data: null,            // { users, accounts, contacts, projects, mfrs, meta }
+  me: null,              // signed-in user { id, name, role, email } or null
+  loginDemo: false,      // login screen hint while demo data is loaded
   today: null,           // YYYY-MM-DD from server
-  currentUserId: localStorage.getItem('cfs-user') || '',
   screen: 'dashboard',
   selId: null,           // selected account (detail screen)
   viewProjId: null,      // selected project (project screen)
@@ -55,6 +56,12 @@ async function api(method, url, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // session expired or signed out elsewhere — back to the login screen
+    state.me = null;
+    render();
+    throw new Error('Please sign in.');
+  }
   if (!res.ok) throw new Error(json.error || 'Request failed (' + res.status + ')');
   return json;
 }
@@ -62,11 +69,8 @@ async function api(method, url, body) {
 async function refresh() {
   const json = await api('GET', '/api/data');
   state.data = json;
+  state.me = json.me;
   state.today = json.today;
-  if (!state.currentUserId || !json.users.some(u => String(u.id) === state.currentUserId)) {
-    const firstSales = json.users.find(u => u.role === 'Sales') || json.users[0];
-    state.currentUserId = firstSales ? String(firstSales.id) : '';
-  }
 }
 
 // ---------- derived data (mirrors the approved design logic) ----------
@@ -85,23 +89,14 @@ function dueInfo(a) {
   return { diff, text: 'due in ' + diff + 'd', cls: 'badge-green', color: '#0d7a4f' };
 }
 
-function currentUser() {
-  const d = state.data;
-  return d.users.find(u => String(u.id) === state.currentUserId) || d.users[0];
-}
+const currentUser = () => state.me;
+const isOwner = () => state.me && state.me.role !== 'Sales';        // manager or owner
+const isOwnerRole = () => state.me && state.me.role === 'Owner';    // owner only
 
-const isOwner = () => currentUser() && currentUser().role !== 'Sales';
-
-// Sales reps only see their own accounts/projects; managers/owners see everything
-function visAccounts() {
-  const d = state.data;
-  return isOwner() ? d.accounts : d.accounts.filter(a => a.rep === currentUser().id);
-}
-
-function visProjects() {
-  const ids = visAccounts().map(a => a.id);
-  return state.data.projects.filter(p => ids.includes(p.acc));
-}
+// The server already filters what a sales rep may see; these are the
+// signed-in user's visible slices.
+const visAccounts = () => state.data.accounts;
+const visProjects = () => state.data.projects;
 
 const repName = id => (state.data.users.find(u => u.id === id) || {}).name || '—';
 const repById = id => state.data.users.find(u => u.id === id);
@@ -218,7 +213,25 @@ const openProject = id => go('project', { viewProjId: id });
 
 // ---------- rendering ----------
 
+function renderLogin() {
+  $('app').innerHTML = `
+  <div class="login-wrap">
+    <form class="login-card" id="login-form">
+      <div class="brand-name" style="font-size:20px;">CFS Flooring</div>
+      <div class="brand-sub" style="margin-bottom:18px;">Sales CRM</div>
+      <div class="field"><label>Email</label>
+        <input id="login-email" class="input" type="email" autocomplete="username" placeholder="you@cfsflooring.com" required></div>
+      <div class="field"><label>Password</label>
+        <input id="login-pass" class="input" type="password" autocomplete="current-password" placeholder="Password" required></div>
+      <div id="login-error" class="form-error" style="display:none;"></div>
+      <button type="submit" class="btn btn-primary" style="padding:11px 0;font-size:14px;">Sign in</button>
+      ${state.loginDemo ? '<div class="login-hint">Demo mode: sign in with any team email (e.g. <b>ray@cfsflooring.com</b>) and the password <b>welcome1</b>. Change passwords in Settings once you’re in.</div>' : ''}
+    </form>
+  </div>`;
+}
+
 function render() {
+  if (!state.me) return renderLogin();
   const d = state.data;
   if (!d) return;
   const user = currentUser();
@@ -246,10 +259,12 @@ function render() {
     <div class="sidebar-footer">
       <div class="signed-in">
         <div class="signed-in-label">Signed in as</div>
-        <select id="user-select" class="user-select" data-action="set-user">
-          ${d.users.map(u => `<option value="${u.id}" ${String(u.id) === state.currentUserId ? 'selected' : ''}>${esc(u.name)} (${u.role})</option>`).join('')}
-        </select>
+        <div class="signed-in-user">${esc(user.name)}</div>
         <div class="signed-in-role">${user.role === 'Sales' ? 'Sales rep' : user.role + ' — full access'}</div>
+        <div class="signed-in-actions">
+          <span class="sidebar-link ${state.screen === 'account' ? 'active' : ''}" data-action="nav" data-screen="account">Change password</span>
+          <span class="sidebar-link" data-action="logout">Sign out</span>
+        </div>
       </div>
       <button class="btn-new-project" data-action="new-project">+ New Project</button>
     </div>
@@ -266,6 +281,7 @@ function renderScreen() {
     case 'projects': return renderProjects();
     case 'project': return renderProject();
     case 'settings': return renderSettings();
+    case 'account': return renderMyAccount();
     case 'new': return renderProjectForm();
     default: return renderDashboard();
   }
@@ -418,8 +434,11 @@ function renderReminders() {
 // ----- accounts list -----
 
 function repOptionsHtml(selectedId) {
-  return state.data.users.filter(u => u.role === 'Sales')
-    .map(u => `<option value="${u.id}" ${String(u.id) === String(selectedId) ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
+  // active sales reps, plus whoever currently holds the assignment (so an
+  // existing selection never disappears from the dropdown)
+  const opts = state.data.users.filter(u =>
+    (u.role === 'Sales' && u.active) || String(u.id) === String(selectedId));
+  return opts.map(u => `<option value="${u.id}" ${String(u.id) === String(selectedId) ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
 }
 
 function cadenceOptionsHtml(selected) {
@@ -455,9 +474,13 @@ function accountRowsHtml() {
 }
 
 function renderAccounts() {
+  // sales reps can only create accounts assigned to themselves
   const defaultRep = isOwner()
-    ? ((state.data.users.find(u => u.role === 'Sales') || {}).id || '')
-    : state.currentUserId;
+    ? ((state.data.users.find(u => u.role === 'Sales' && u.active) || state.me).id)
+    : state.me.id;
+  const repField = isOwner()
+    ? `<select id="na-rep" class="select">${repOptionsHtml(defaultRep)}</select>`
+    : `<select id="na-rep" class="select" disabled><option value="${state.me.id}" selected>${esc(state.me.name)} (you)</option></select>`;
   return `
   <div class="page-head">
     <h1>Accounts</h1>
@@ -475,7 +498,7 @@ function renderAccounts() {
         <select id="na-type" class="select">
           ${['Builder', 'General Contractor', 'Designer', 'Property Manager', 'Other'].map(t => `<option>${t}</option>`).join('')}
         </select></div>
-      <div class="field"><label>Assigned rep</label><select id="na-rep" class="select">${repOptionsHtml(defaultRep)}</select></div>
+      <div class="field"><label>Assigned rep</label>${repField}</div>
       <div class="field"><label>Contact cadence</label><select id="na-cadence" class="select">${cadenceOptionsHtml(30)}</select></div>
       <div class="actions">
         <button class="btn btn-cancel" data-action="toggle-acc-form">Cancel</button>
@@ -733,16 +756,26 @@ function renderProjectForm() {
 function renderSettings() {
   const d = state.data;
   const avatarColors = ['#1d4f8f', '#0d7a4f', '#8a5a1d', '#5a3d8a'];
+  // Managers can manage the team but cannot touch Owner accounts or grant Owner
+  const canEditUser = u => isOwnerRole() || u.role !== 'Owner';
+  const roleOptions = current =>
+    ['Owner', 'Manager', 'Sales']
+      .filter(r => r !== 'Owner' || isOwnerRole() || current === 'Owner')
+      .map(r => `<option ${current === r ? 'selected' : ''}>${r}</option>`).join('');
 
   const teamRow = (u, i) => state.editUserId === u.id ? `
     <div class="team-row">
       <div class="inline-form" style="flex:1;">
         <input id="eu-name" class="input" placeholder="Full name *" value="${esc(u.name)}">
-        <input id="eu-email" class="input" placeholder="Email" value="${esc(u.email)}">
-        <div class="field span2"><label>Role</label>
-          <select id="eu-role" class="select">
-            ${['Owner', 'Manager', 'Sales'].map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
-          </select></div>
+        <input id="eu-email" class="input" placeholder="Email (sign-in) *" value="${esc(u.email)}">
+        <div class="field"><label>Role</label>
+          <select id="eu-role" class="select" ${u.role === 'Owner' && !isOwnerRole() ? 'disabled' : ''}>${roleOptions(u.role)}</select></div>
+        <div class="field"><label>Reset password <span style="font-weight:400;color:#8a9099;">(optional)</span></label>
+          <input id="eu-pass" class="input" type="password" autocomplete="new-password" placeholder="New password (8+ chars)"></div>
+        <label class="check-line span2">
+          <input id="eu-active" type="checkbox" ${u.active ? 'checked' : ''} ${String(u.id) === String(state.me.id) ? 'disabled' : ''}>
+          Sign-in enabled ${String(u.id) === String(state.me.id) ? '<span style="color:#8a9099;font-weight:400;">(you can’t disable yourself)</span>' : ''}
+        </label>
         <div id="eu-error" class="form-error span2" style="display:none;"></div>
         <div class="actions">
           <button class="btn-sm-cancel" data-action="cancel-edit-user">Cancel</button>
@@ -750,14 +783,15 @@ function renderSettings() {
         </div>
       </div>
     </div>` : `
-    <div class="team-row">
+    <div class="team-row" style="${u.active ? '' : 'opacity:0.55;'}">
       <div class="avatar" style="background:${avatarColors[i % 4]};">${esc(u.name.split(' ').map(w => w[0]).join('').slice(0, 2))}</div>
       <div style="flex:1;">
-        <div class="contact-name">${esc(u.name)} <span class="muted-inline">${String(u.id) === state.currentUserId ? '(you)' : ''}</span></div>
+        <div class="contact-name">${esc(u.name)} <span class="muted-inline">${String(u.id) === String(state.me.id) ? '(you)' : ''}</span></div>
         <div class="reminder-sub">${esc(u.email)}</div>
       </div>
+      ${u.active ? '' : '<span class="badge badge-gray">disabled</span>'}
       <span class="role-tag" style="background:${u.role === 'Sales' ? '#e9edf2' : '#e7effc'};color:${u.role === 'Sales' ? '#565d66' : '#1d4f8f'};">${u.role}</span>
-      <span class="link-strong" style="font-size:12px;" data-action="edit-user" data-id="${u.id}">Edit</span>
+      ${canEditUser(u) ? `<span class="link-strong" style="font-size:12px;" data-action="edit-user" data-id="${u.id}">Edit</span>` : '<span style="width:24px;"></span>'}
     </div>`;
 
   return `
@@ -769,13 +803,15 @@ function renderSettings() {
           <div class="card-title" style="margin-bottom:4px;">Team profiles</div>
           <span class="link-strong" data-action="toggle-user-form">+ Add member</span>
         </div>
-        <div class="card-sub" style="margin-bottom:12px;">Managers/owners can manage manufacturers and the team; sales reps log jobs and manage clients.</div>
+        <div class="card-sub" style="margin-bottom:12px;">Each member signs in with their email and password. Owners manage everyone; managers manage everyone except owners; sales reps see only their own accounts.</div>
         ${state.userFormOpen ? `
         <div class="inline-form" style="margin-bottom:12px;">
           <input id="nu-name" class="input" placeholder="Full name *">
-          <input id="nu-email" class="input" placeholder="Email">
-          <div class="field span2"><label>Role</label>
-            <select id="nu-role" class="select"><option>Sales</option><option>Manager</option><option>Owner</option></select></div>
+          <input id="nu-email" class="input" placeholder="Email (sign-in) *">
+          <div class="field"><label>Role</label>
+            <select id="nu-role" class="select"><option>Sales</option><option>Manager</option>${isOwnerRole() ? '<option>Owner</option>' : ''}</select></div>
+          <div class="field"><label>Password *</label>
+            <input id="nu-pass" class="input" type="password" autocomplete="new-password" placeholder="8+ characters"></div>
           <div id="nu-error" class="form-error span2" style="display:none;"></div>
           <div class="actions">
             <button class="btn-sm-cancel" data-action="toggle-user-form">Cancel</button>
@@ -802,13 +838,33 @@ function renderSettings() {
           </div>
         </div>
 
-        ${d.meta && d.meta.demo ? `
+        ${d.meta && d.meta.demo && isOwnerRole() ? `
         <div class="card">
           <div class="card-title" style="margin-bottom:4px;">Demo data</div>
-          <div class="card-sub" style="margin-bottom:12px;">This CRM is currently filled with sample accounts, contacts, and projects so you can explore. When you&rsquo;re ready to start entering real data, clear it — team members and manufacturers are kept.</div>
+          <div class="card-sub" style="margin-bottom:12px;">This CRM is currently filled with sample accounts, contacts, and projects so you can explore. When you&rsquo;re ready to start entering real data, clear it — team members and manufacturers are kept. Remember to change the seeded team passwords too (Edit &rarr; Reset password).</div>
           <button class="btn btn-danger" data-action="clear-demo">Clear demo data</button>
         </div>` : ''}
       </div>
+    </div>
+  </div>`;
+}
+
+// ----- my account (change password) -----
+
+function renderMyAccount() {
+  return `
+  <div style="max-width:420px;">
+    <h1 style="margin-bottom:4px;">Change password</h1>
+    <p class="page-sub">Signed in as ${esc(state.me.name)} &middot; ${esc(state.me.email)}</p>
+    <div class="card" style="display:flex;flex-direction:column;gap:14px;">
+      <div class="field"><label>Current password</label>
+        <input id="pw-current" class="input" type="password" autocomplete="current-password"></div>
+      <div class="field"><label>New password</label>
+        <input id="pw-new" class="input" type="password" autocomplete="new-password" placeholder="8+ characters"></div>
+      <div class="field"><label>Confirm new password</label>
+        <input id="pw-confirm" class="input" type="password" autocomplete="new-password"></div>
+      <div id="pw-error" class="form-error" style="display:none;"></div>
+      <button class="btn btn-primary" data-action="save-password" style="padding:10px 0;">Update password</button>
     </div>
   </div>`;
 }
@@ -890,23 +946,65 @@ async function saveProject() {
 async function saveUser() {
   try {
     await api('POST', '/api/users', {
-      name: $('nu-name').value, email: $('nu-email').value, role: $('nu-role').value,
+      name: $('nu-name').value, email: $('nu-email').value,
+      role: $('nu-role').value, password: $('nu-pass').value,
     });
     await refresh();
     state.userFormOpen = false;
     render();
+    toast('Team member added — they can sign in with their email and password.');
   } catch (e) { showFormError('nu-error', e.message); }
 }
 
 async function saveEditUser(id) {
+  const body = {
+    name: $('eu-name').value, email: $('eu-email').value,
+    role: $('eu-role').value, active: $('eu-active').checked,
+  };
+  const pass = $('eu-pass').value;
+  if (pass) body.password = pass;
   try {
-    await api('PATCH', '/api/users/' + id, {
-      name: $('eu-name').value, email: $('eu-email').value, role: $('eu-role').value,
-    });
+    await api('PATCH', '/api/users/' + id, body);
     await refresh();
     state.editUserId = null;
     render();
+    if (pass) toast('Password reset — they’ve been signed out everywhere.');
   } catch (e) { showFormError('eu-error', e.message); }
+}
+
+async function login() {
+  try {
+    await api('POST', '/api/login', {
+      email: $('login-email').value, password: $('login-pass').value,
+    });
+    await refresh();
+    state.screen = 'dashboard';
+    render();
+  } catch (e) { showFormError('login-error', e.message); }
+}
+
+async function logout() {
+  try { await api('POST', '/api/logout'); } catch (e) { /* session may already be gone */ }
+  state.me = null;
+  state.data = null;
+  loadLoginInfo().then(renderLogin);
+}
+
+async function savePassword() {
+  const current = $('pw-current').value, next = $('pw-new').value, confirm = $('pw-confirm').value;
+  if (next !== confirm) return showFormError('pw-error', 'New passwords don’t match.');
+  try {
+    await api('POST', '/api/me/password', { current, password: next });
+    go('dashboard');
+    toast('Password updated.');
+  } catch (e) { showFormError('pw-error', e.message); }
+}
+
+async function loadLoginInfo() {
+  try {
+    const info = await fetch('/api/login-info').then(r => r.json());
+    state.loginDemo = !!info.demo;
+  } catch (e) { state.loginDemo = false; }
 }
 
 async function addManufacturer(inputId, alsoSelect) {
@@ -949,6 +1047,8 @@ document.addEventListener('click', async e => {
 
   switch (action) {
     case 'nav': return go(el.dataset.screen);
+    case 'logout': return logout();
+    case 'save-password': return savePassword();
     case 'new-project': return go('new', { editId: null, fMfrs: [] });
     case 'open-account': return openAccount(id);
     case 'open-project': return openProject(id);
@@ -1022,15 +1122,6 @@ document.addEventListener('change', async e => {
   const el = e.target.closest('[data-action]');
   if (!el) return;
   switch (el.dataset.action) {
-    case 'set-user': {
-      state.currentUserId = el.value;
-      localStorage.setItem('cfs-user', el.value);
-      if (state.screen === 'settings' && !isOwner()) state.screen = 'dashboard';
-      // A rep may not be allowed to see the account/project they were viewing
-      if (state.screen === 'detail' && !visAccounts().some(a => a.id === state.selId)) state.screen = 'accounts';
-      if (state.screen === 'project' && !visProjects().some(p => p.id === state.viewProjId)) state.screen = 'projects';
-      return render();
-    }
     case 'set-range': state.range = el.value; return render();
     case 'set-pstatus': state.pStatus = el.value; return render();
     case 'set-pmfr': state.pMfr = el.value; return render();
@@ -1081,19 +1172,21 @@ document.addEventListener('keydown', e => {
 let lastSnapshot = '';
 
 async function backgroundSync() {
-  // Don't clobber open forms mid-edit
-  if (state.accFormOpen || state.conFormOpen || state.editConId != null ||
-      state.userFormOpen || state.editUserId != null || state.screen === 'new') return;
+  // Don't clobber open forms mid-edit (and don't poll while signed out)
+  if (!state.me || state.accFormOpen || state.conFormOpen || state.editConId != null ||
+      state.userFormOpen || state.editUserId != null ||
+      state.screen === 'new' || state.screen === 'account') return;
   try {
     const json = await api('GET', '/api/data');
     const snap = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs]);
     if (snap !== lastSnapshot) {
       lastSnapshot = snap;
       state.data = json;
+      state.me = json.me;
       state.today = json.today;
       render();
     }
-  } catch (e) { /* transient network issue; next tick will retry */ }
+  } catch (e) { /* transient network issue (or 401 already handled); next tick retries */ }
 }
 
 setInterval(backgroundSync, 45000);
@@ -1101,10 +1194,25 @@ window.addEventListener('focus', backgroundSync);
 
 // ---------- boot ----------
 
+// login form submit (Enter key or button)
+document.addEventListener('submit', e => {
+  if (e.target.id === 'login-form') { e.preventDefault(); login(); }
+});
+
 (async function boot() {
   try {
-    await refresh();
-    lastSnapshot = JSON.stringify([state.data.users, state.data.accounts, state.data.contacts, state.data.projects, state.data.mfrs]);
+    const res = await fetch('/api/data');
+    if (res.status === 401) {
+      await loadLoginInfo();
+      renderLogin();
+      return;
+    }
+    if (!res.ok) throw new Error('Request failed (' + res.status + ')');
+    const json = await res.json();
+    state.data = json;
+    state.me = json.me;
+    state.today = json.today;
+    lastSnapshot = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs]);
     render();
   } catch (e) {
     $('app').innerHTML = '<div class="boot">Could not reach the CRM server. Is it running? (' + esc(e.message) + ')</div>';
