@@ -86,7 +86,7 @@ The deploy prints your `https://…run.app` URL. Notes:
 | **Dashboard** | KPIs, top 10 clients by jobs, manufacturer utilization, top contact reminders, and clients longest without a job — filterable by time range. |
 | **Reminders** | The full versions of both reminder lists, sorted by most overdue. |
 | **Accounts** | Search, add accounts, see cadence and next-contact status at a glance. |
-| **Account detail** | Assigned rep, contact cadence, notes (auto-saved), contacts (add/edit), full project history, **Log contact today**, and email buttons. |
+| **Account detail** | Assigned rep, notes (auto-saved), contacts (add/edit) each with their own cadence, due badge, **Log contact** and **Email** buttons, a **Recent activity** trail (emails, touches, jobs — timestamped in Mountain time), plus full project history. |
 | **Projects** | All jobs, filterable by status and manufacturer. |
 | **+ New Project** | Log a job — saving it also logs a contact touch on the account. |
 | **Settings** | (Owners/Managers) Manage the team, the manufacturer tag list, and demo data. |
@@ -94,8 +94,8 @@ The deploy prints your `https://…run.app` URL. Notes:
 Notes on how it behaves:
 
 - **Roles:** Sales reps see only their own accounts and projects (enforced server-side); Owners/Managers see everything and get the Settings screen.
-- **Cadence:** each account has a contact rhythm (weekly → quarterly). The badge goes green → amber (due within 7 days) → red (overdue). Logging a contact or saving a job resets the clock.
-- **Email buttons** open your regular mail app with a pre-filled message (to the account's primary contact, CC the rep — or to the rep for reminders).
+- **Cadence lives with the person:** each contact has their own rhythm (weekly → quarterly). The badge goes green → amber (due within 7 days) → red (overdue); brand-new contacts show "no contact yet". Logging a contact (or saving a job with them as the contact) resets their clock. An account's "next contact" status reflects its most urgent person, and reminders list people, not companies.
+- **Email buttons** open a Gmail compose window in a new tab, pre-addressed to that contact's email (CC the rep — or to the rep for reminders). Every email action is documented in the account's activity trail with the date and time in Mountain time (MST/MDT), along with logged contacts and saved jobs.
 - The app **auto-refreshes** every ~45 seconds so teammates' changes show up on their own.
 
 ## For developers

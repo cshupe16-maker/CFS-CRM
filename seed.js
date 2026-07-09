@@ -27,6 +27,7 @@ const C = (id, acc, name, title, primary) => {
   return {
     id, acc, name, title, primary,
     rep: a.rep,
+    cadence: a.cadence, // contact cadence lives with the person
     lastContact: primary ? a.lastContact : daysBack(a.lastContact, 30 + id * 5),
     email: name.toLowerCase().replace(/[^a-z ]/g, '').split(' ').join('.') + '@' +
       a.name.toLowerCase().replace(/[^a-z]/g, '') + '.com',

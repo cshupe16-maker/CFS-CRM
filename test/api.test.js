@@ -127,8 +127,37 @@ async function main() {
     check('account reassignable to a manager', r.status === 200 && r.json.account.rep === 2);
 
     // ---- contacts & projects on own account ----
-    r = await req(deshawn.cookie, 'POST', '/api/contacts', { acc: ownAcc, name: 'Pat Tester', email: 'pat@t.com' });
+    r = await req(deshawn.cookie, 'POST', '/api/contacts', { acc: ownAcc, name: 'Pat Tester', email: 'pat@t.com', cadence: 14 });
     check('sales adds contact to own account', r.status === 200 && r.json.contact.primary === true);
+    check('contact carries its own cadence', r.json.contact.cadence === 14 && r.json.contact.lastContact === null);
+    const patId = r.json.contact.id;
+
+    r = await req(deshawn.cookie, 'PATCH', '/api/contacts/' + patId, { cadence: 7 });
+    check('contact cadence editable', r.status === 200 && r.json.contact.cadence === 7);
+    r = await req(deshawn.cookie, 'PATCH', '/api/contacts/' + patId, { cadence: 13 });
+    check('invalid cadence rejected', r.status === 400);
+
+    r = await req(deshawn.cookie, 'POST', '/api/contacts/' + patId + '/log-contact');
+    check('log contact on a person', r.status === 200 && r.json.contact.lastContact !== null);
+
+    // activity trail: emails and touches are documented with timestamps
+    r = await req(deshawn.cookie, 'POST', '/api/accounts/' + ownAcc + '/email-rep');
+    check('email-rep logs activity', r.status === 200);
+    r = await req(deshawn.cookie, 'POST', '/api/contacts/' + patId + '/email-log');
+    check('email-contact logs activity', r.status === 200);
+    r = await req(carla.cookie, 'POST', '/api/accounts/' + ownAcc + '/email-rep');
+    check('other rep cannot log email-rep activity', r.status === 403);
+    r = await req(deshawn.cookie, 'GET', '/api/data');
+    const acts = r.json.activity.filter(e => e.acc === ownAcc);
+    check('activity entries recorded with ISO timestamps',
+      acts.some(e => e.text.startsWith('Emailed reminder to rep')) &&
+      acts.some(e => e.text.startsWith('Emailed Pat Tester')) &&
+      acts.some(e => e.text.startsWith('Logged contact with')) &&
+      acts.every(e => !isNaN(Date.parse(e.ts)) && e.user === 'Deshawn Reed'));
+    r = await req(deshawn.cookie, 'POST', '/api/contacts/9999/log-contact');
+    check('log contact on missing person 404', r.status === 404);
+    r = await req(carla.cookie, 'POST', '/api/contacts/' + patId + '/log-contact');
+    check('other rep cannot log contact on this person', r.status === 403);
     r = await req(deshawn.cookie, 'POST', '/api/projects', { acc: ownAcc, name: 'Job One', status: 'Completed', date: '2026-07-01', mfrs: ['Shaw'] });
     check('sales logs job on own account', r.status === 200);
     r = await req(deshawn.cookie, 'POST', '/api/projects', { acc: ownAcc, name: 'Job Two', status: 'In Progress', mfrs: ['NewBrandX'] });

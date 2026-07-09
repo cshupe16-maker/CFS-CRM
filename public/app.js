@@ -81,12 +81,27 @@ function daysSince(d) {
   return Math.round((Date.parse(today()) - Date.parse(d)) / 86400000);
 }
 
-function dueInfo(a) {
-  const diff = a.cadence - daysSince(a.lastContact); // days until next contact due
+// Works for anything with { cadence, lastContact } — since cadence lives with
+// each contact (person), that's usually a contact.
+function dueInfo(x) {
+  if (!x.lastContact) // brand-new contact, never touched
+    return { diff: -9999, text: 'no contact yet', cls: 'badge-amber', color: '#8a5a1d' };
+  const since = daysSince(x.lastContact);
+  if (since < 0) // logged with a future date (e.g. timezone edge) — treat as fresh
+    return { diff: x.cadence, text: 'due in ' + x.cadence + 'd', cls: 'badge-green', color: '#0d7a4f' };
+  const diff = x.cadence - since; // days until next contact due
   if (diff < 0) return { diff, text: Math.abs(diff) + 'd overdue', cls: 'badge-red', color: '#b3382c' };
   if (diff === 0) return { diff, text: 'due today', cls: 'badge-amber', color: '#8a5a1d' };
   if (diff <= 7) return { diff, text: 'due in ' + diff + 'd', cls: 'badge-amber', color: '#8a5a1d' };
   return { diff, text: 'due in ' + diff + 'd', cls: 'badge-green', color: '#0d7a4f' };
+}
+
+// The most urgent contact of an account drives the account's due status
+function urgentContact(accId) {
+  const list = state.data.contacts.filter(c => c.acc === accId)
+    .map(c => ({ c, d: dueInfo(c) }))
+    .sort((x, y) => x.d.diff - y.d.diff);
+  return list[0] || null;
 }
 
 const currentUser = () => state.me;
@@ -142,16 +157,17 @@ function rangeLabel() {
 function agoText(d) {
   if (d === '—') return 'no jobs yet';
   const days = daysSince(d);
+  if (days < 0) return 'upcoming'; // completion date set in the future
   return days >= 365 ? (days / 365).toFixed(1) + ' yrs ago'
     : days >= 60 ? Math.round(days / 30) + ' mo ago' : days + 'd ago';
 }
 
-// Reminder lists: organized by person — the contact is the headline
+// Reminder lists: one entry per PERSON — each contact has their own cadence
 function remindersAll() {
-  return visAccounts()
-    .map(a => ({ a, d: dueInfo(a) }))
-    .sort((x, y) => x.d.diff - y.d.diff)
-    .map(({ a, d }) => ({ a, d, person: (primaryContactOf(a.id) || {}).name || '—' }));
+  return state.data.contacts
+    .map(c => ({ c, a: accById(c.acc), d: dueInfo(c) }))
+    .filter(x => x.a)
+    .sort((x, y) => x.d.diff - y.d.diff);
 }
 
 function staleAll() {
@@ -161,26 +177,51 @@ function staleAll() {
     .map(({ a, last }) => ({ a, last, person: (primaryContactOf(a.id) || {}).name || '—' }));
 }
 
-// ---------- email actions (opens the user's mail app, prefilled) ----------
-
-function mailto(to, cc, subject, body) {
-  let url = 'mailto:' + encodeURIComponent(to) +
-    '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
-  if (cc) url += '&cc=' + encodeURIComponent(cc);
-  window.location.href = url;
+// Activity timestamps display in Mountain time (MST/MDT switches automatically)
+function fmtMountain(ts) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Denver',
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+    }).format(new Date(ts));
+  } catch (e) { return ts; }
 }
 
-function emailContact(accId) {
-  const a = accById(accId);
-  if (!a) return;
-  const c = primaryContactOf(a.id);
-  const rep = repById(a.rep);
-  if (!c || !c.email) return emailRep(accId);
-  mailto(c.email, rep ? rep.email : '',
-    'Checking in — ' + a.name,
+// ---------- email actions (opens Gmail compose in a new tab, prefilled) ----------
+
+function gmailCompose(to, cc, subject, body) {
+  const url = 'https://mail.google.com/mail/?view=cm&fs=1' +
+    '&to=' + encodeURIComponent(to) +
+    (cc ? '&cc=' + encodeURIComponent(cc) : '') +
+    '&su=' + encodeURIComponent(subject) +
+    '&body=' + encodeURIComponent(body);
+  window.open(url, '_blank', 'noopener');
+}
+
+// Email a specific person, using the email assigned to that contact
+function emailContactPerson(conId) {
+  const c = state.data.contacts.find(x => x.id === conId);
+  if (!c) return;
+  const a = accById(c.acc);
+  if (!c.email) return toast('No email on file for ' + c.name + ' — add one with Edit on their contact card.');
+  const rep = repById(c.rep);
+  gmailCompose(c.email, rep ? rep.email : '',
+    'Checking in — ' + (a ? a.name : 'CFS Flooring'),
     'Hi ' + c.name.split(' ')[0] + ',\n\nJust checking in from CFS Flooring. ' +
     'Anything coming up we can help with?\n\nThanks,\n' + (rep ? rep.name : 'CFS Flooring'));
-  toast('Opening email to ' + c.name + ' (' + c.email + ')' + (rep ? ' — copied to ' + rep.name + '.' : '.'));
+  toast('Opening Gmail to ' + c.name + ' (' + c.email + ')' + (rep ? ' — cc ' + rep.name + '.' : '.'));
+  // record it in the account's activity trail
+  api('POST', '/api/contacts/' + c.id + '/email-log')
+    .then(refresh).then(() => { if (state.screen === 'detail') render(); })
+    .catch(() => { /* activity logging is best-effort */ });
+}
+
+// Email an account's primary contact (used by account-level lists)
+function emailContact(accId) {
+  const c = primaryContactOf(accId);
+  if (!c) return emailRep(accId);
+  emailContactPerson(c.id);
 }
 
 function emailRep(accId) {
@@ -188,12 +229,17 @@ function emailRep(accId) {
   if (!a) return;
   const rep = repById(a.rep);
   if (!rep || !rep.email) return toast('No rep email on file for ' + a.name + '. Add one in Settings.');
-  const due = dueInfo(a);
-  mailto(rep.email, '',
-    'Reminder: contact ' + a.name + ' — ' + due.text,
-    a.name + ' is ' + due.text + ' for a touch (cadence: ' + cadLabel(a.cadence) + ').\n\n' +
-    'Notes: ' + (a.note || 'no notes'));
-  toast('Opening reminder email to ' + rep.name + ' (' + rep.email + ') about ' + a.name + '.');
+  const u = urgentContact(a.id);
+  const dueLine = u ? u.c.name + ' is ' + u.d.text + ' for a touch (cadence: ' + cadLabel(u.c.cadence) + ').'
+    : 'No contacts on file yet.';
+  gmailCompose(rep.email, '',
+    'Reminder: reach out to ' + a.name + (u ? ' — ' + u.d.text : ''),
+    dueLine + '\n\nNotes: ' + (a.note || 'no notes'));
+  toast('Opening Gmail reminder to ' + rep.name + ' (' + rep.email + ') about ' + a.name + '.');
+  // record it in the account's activity trail
+  api('POST', '/api/accounts/' + a.id + '/email-rep')
+    .then(refresh).then(() => { if (state.screen === 'detail') render(); })
+    .catch(() => { /* activity logging is best-effort */ });
 }
 
 // ---------- navigation ----------
@@ -289,26 +335,30 @@ function renderScreen() {
 
 // ----- shared row templates -----
 
-function reminderRowHtml(person, a, badgeTextCls, badgeText, subLine) {
+function reminderRowHtml(person, accId, badgeTextCls, badgeText, subLine, emailAction, emailId) {
   return `
   <div class="reminder-row">
     <div class="reminder-main">
-      <div class="reminder-person" data-action="open-account" data-id="${a.id}">${esc(person)}</div>
+      <div class="reminder-person" data-action="open-account" data-id="${accId}">${esc(person)}</div>
       <div class="reminder-sub">${subLine}</div>
     </div>
     <span class="badge pill ${badgeTextCls}">${esc(badgeText)}</span>
-    <button class="btn btn-outline" data-action="email-contact" data-id="${a.id}">Email contact</button>
+    <button class="btn btn-outline" data-action="${emailAction}" data-id="${emailId}">Email contact</button>
   </div>`;
 }
 
+// r = { c: contact, a: account, d: dueInfo } — the person is the headline
 function contactReminderRow(r) {
-  return reminderRowHtml(r.person, r.a, r.d.cls, r.d.text,
-    `${esc(r.a.name)} &middot; ${esc(repName(r.a.rep))} &middot; ${esc(cadLabel(r.a.cadence))}`);
+  return reminderRowHtml(r.c.name, r.a.id, r.d.cls, r.d.text,
+    `${esc(r.a.name)} &middot; ${esc(repName(r.c.rep))} &middot; ${esc(cadLabel(r.c.cadence))}`,
+    'email-contact-person', r.c.id);
 }
 
 function staleRow(s) {
-  return reminderRowHtml(s.person, s.a, 'badge-red', agoText(s.last),
-    `${esc(s.a.name)} &middot; ${esc(repName(s.a.rep))} &middot; last job ${esc(s.last)}`);
+  const ago = agoText(s.last);
+  return reminderRowHtml(s.person, s.a.id, ago === 'upcoming' ? 'badge-blue' : 'badge-red', ago,
+    `${esc(s.a.name)} &middot; ${esc(repName(s.a.rep))} &middot; last job ${esc(s.last)}`,
+    'email-contact', s.a.id);
 }
 
 const emptyNote = msg => `<div class="empty-note">${msg}</div>`;
@@ -320,7 +370,8 @@ function renderDashboard() {
   const visible = visProjects();
   const ranged = visible.filter(inRange);
   const accounts = visAccounts();
-  const overdue = accounts.filter(a => dueInfo(a).diff < 0);
+  // people (contacts) past their cadence — includes never-contacted
+  const overdue = state.data.contacts.filter(c => dueInfo(c).diff < 0);
 
   const byAcc = {};
   ranged.forEach(p => { byAcc[p.acc] = (byAcc[p.acc] || 0) + 1; });
@@ -454,16 +505,17 @@ function accountRowsHtml() {
   const rows = visAccounts()
     .filter(a => !q || a.name.toLowerCase().includes(q) || a.type.toLowerCase().includes(q))
     .map(a => {
-      const due = dueInfo(a);
+      // due status comes from the account's most urgent contact (person)
+      const u = urgentContact(a.id);
       return `
       <div class="td strong link" data-action="open-account" data-id="${a.id}">${esc(a.name)}</div>
       <div class="td">${esc(a.type)}</div>
       <div class="td">${esc(repName(a.rep))}</div>
       <div class="td right" style="color:#22262b;">${state.data.projects.filter(p => p.acc === a.id).length}</div>
       <div class="td right dim">${esc(lastJobOf(a.id))}</div>
-      <div class="td right dim">${esc(a.lastContact)}</div>
-      <div class="td">${esc(cadLabel(a.cadence))}</div>
-      <div class="td" style="padding:7px 0;"><span class="badge ${due.cls}">${esc(due.text)}</span></div>`;
+      <div class="td right dim">${esc(a.lastContact || '—')}</div>
+      <div class="td">${u ? esc(cadLabel(u.c.cadence)) + ' <span style="color:#8a9099;">&middot; ' + esc(u.c.name.split(' ')[0]) + '</span>' : '—'}</div>
+      <div class="td" style="padding:7px 0;">${u ? `<span class="badge ${u.d.cls}">${esc(u.d.text)}</span>` : '<span class="badge badge-gray">no contacts</span>'}</div>`;
     }).join('');
 
   return `
@@ -502,7 +554,7 @@ function renderAccounts() {
           ${['Builder', 'General Contractor', 'Designer', 'Property Manager', 'Other'].map(t => `<option>${t}</option>`).join('')}
         </select></div>
       <div class="field"><label>Assigned rep</label>${repField}</div>
-      <div class="field"><label>Contact cadence</label><select id="na-cadence" class="select">${cadenceOptionsHtml(30)}</select></div>
+      <div class="field" style="justify-content:flex-end;"><div class="chip-hint" style="padding-bottom:9px;">Contact cadence is set per person when you add contacts.</div></div>
       <div class="actions">
         <button class="btn btn-cancel" data-action="toggle-acc-form">Cancel</button>
         <button class="btn btn-primary" data-action="save-account" style="padding:9px 18px;">Save account</button>
@@ -520,7 +572,7 @@ function renderDetail() {
   if (!a) return '<div class="empty-note">Account not found.</div>';
   const ps = state.data.projects.filter(p => p.acc === a.id)
     .slice().sort((x, y) => (y.date || '9999').localeCompare(x.date || '9999'));
-  const due = dueInfo(a);
+  const urgent = urgentContact(a.id);
   const contacts = state.data.contacts.filter(c => c.acc === a.id);
 
   const contactCard = c => state.editConId === c.id ? `
@@ -530,27 +582,40 @@ function renderDetail() {
         <input id="ec-title" class="input" placeholder="Title" value="${esc(c.title)}">
         <input id="ec-email" class="input" placeholder="Email" value="${esc(c.email)}">
         <input id="ec-phone" class="input" placeholder="Phone" value="${esc(c.phone)}">
-        <div class="field span2"><label>Assigned sales rep</label>
+        <div class="field"><label>Assigned sales rep</label>
           <select id="ec-rep" class="select">${repOptionsHtml(c.rep != null ? c.rep : a.rep)}</select></div>
+        <div class="field"><label>Contact cadence</label>
+          <select id="ec-cadence" class="select">${cadenceOptionsHtml(c.cadence)}</select></div>
         <div id="ec-error" class="form-error span2" style="display:none;"></div>
         <div class="actions">
           <button class="btn-sm-cancel" data-action="cancel-edit-contact">Cancel</button>
           <button class="btn-sm-save" data-action="save-edit-contact" data-id="${c.id}">Save</button>
         </div>
       </div>
-    </div>` : `
+    </div>` : (() => {
+      const d = dueInfo(c);
+      return `
     <div class="contact-card">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
         <div style="min-width:0;">
           <div class="contact-name">${esc(c.name)} <span class="muted-inline">${c.primary ? '&middot; primary' : ''}</span></div>
           <div class="contact-line">${esc(c.title)}</div>
           <div class="contact-line dim">${esc(c.email)}${c.email && c.phone ? ' &middot; ' : ''}${esc(c.phone)}</div>
-          <div class="contact-line dim" style="margin-top:2px;">Last contact <span style="font-weight:600;color:#565d66;">${esc(c.lastContact || '—')}</span></div>
+          <div class="contact-line dim" style="margin-top:2px;">Last contact <span style="font-weight:600;color:#565d66;">${esc(c.lastContact || '—')}</span> <span class="badge ${d.cls}">${esc(d.text)}</span></div>
+          <div class="contact-line" style="margin-top:6px;display:flex;align-items:center;gap:6px;">
+            <span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#8a9099;">Cadence</span>
+            <select class="select" data-action="con-cadence" data-id="${c.id}" style="padding:3px 6px;font-size:12px;">${cadenceOptionsHtml(c.cadence)}</select>
+          </div>
           <div class="rep-chip"><span class="rep-chip-label">Sales rep</span><span class="rep-chip-name">${esc(repName(c.rep))}</span></div>
         </div>
-        <span class="link-strong" style="font-size:12px;flex-shrink:0;" data-action="edit-contact" data-id="${c.id}">Edit</span>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0;">
+          <span class="link-strong" style="font-size:12px;" data-action="edit-contact" data-id="${c.id}">Edit</span>
+          <button class="btn btn-outline" data-action="log-contact-person" data-id="${c.id}">Log contact</button>
+          <button class="btn btn-outline" data-action="email-contact-person" data-id="${c.id}">Email</button>
+        </div>
       </div>
     </div>`;
+    })();
 
   return `
   <span class="back-link" data-action="nav" data-screen="accounts">&larr; All accounts</span>
@@ -562,8 +627,10 @@ function renderDetail() {
   <div class="kpis" style="margin-bottom:20px;">
     <div class="kpi dark"><div class="kpi-label">Tracked jobs</div><div class="kpi-detail-value">${ps.length}</div></div>
     <div class="kpi"><div class="kpi-label">Last job</div><div class="kpi-detail-value">${esc(lastJobOf(a.id))}</div></div>
-    <div class="kpi"><div class="kpi-label">Last contact</div><div class="kpi-detail-value">${esc(a.lastContact)}</div></div>
-    <div class="kpi"><div class="kpi-label">Next contact</div><div class="kpi-detail-value" style="color:${due.color};">${esc(due.text)}</div></div>
+    <div class="kpi"><div class="kpi-label">Last contact</div><div class="kpi-detail-value">${esc(a.lastContact || '—')}</div></div>
+    <div class="kpi"><div class="kpi-label">Next contact</div>${urgent
+      ? `<div class="kpi-detail-value" style="color:${urgent.d.color};">${esc(urgent.d.text)}</div><div class="kpi-sub">${esc(urgent.c.name)}</div>`
+      : '<div class="kpi-detail-value">—</div><div class="kpi-sub">no contacts yet</div>'}</div>
   </div>
 
   <div class="detail-grid">
@@ -572,14 +639,19 @@ function renderDetail() {
         <div class="card-title-sm">Relationship</div>
         <div class="field"><label>Assigned rep</label>
           <select class="select" data-action="rel-rep">${repOptionsHtml(a.rep)}</select></div>
-        <div class="field"><label>Contact cadence</label>
-          <select class="select" data-action="rel-cadence">${cadenceOptionsHtml(a.cadence)}</select></div>
         <div class="field"><label>Contact notes</label>
           <textarea id="rel-note" class="input" rows="4" data-action="rel-note" placeholder="How and when to reach this account&hellip;">${esc(a.note)}</textarea></div>
-        <div style="display:flex;flex-direction:column;gap:8px;">
-          <button class="btn btn-primary btn-block" data-action="log-contact" data-id="${a.id}">Log contact today</button>
-          <button class="btn btn-outline btn-block" data-action="email-rep" data-id="${a.id}" style="font-weight:700;">Email reminder to rep</button>
-        </div>
+        <div class="chip-hint">Contact cadence and &ldquo;Log contact&rdquo; live on each person&rsquo;s card &rarr;</div>
+        <button class="btn btn-outline btn-block" data-action="email-rep" data-id="${a.id}" style="font-weight:700;">Email reminder to rep</button>
+      </div>
+
+      <div class="card rel-card">
+        <div class="card-title-sm">Recent activity</div>
+        ${(state.data.activity || []).filter(e => e.acc === a.id).slice(-8).reverse().map(e => `
+          <div style="border-top:1px solid #eef0f3;padding-top:8px;">
+            <div style="font-size:13px;font-weight:600;">${esc(e.text)}</div>
+            <div style="font-size:12px;color:#8a9099;">${esc(fmtMountain(e.ts))}${e.user ? ' &middot; by ' + esc(e.user) : ''}</div>
+          </div>`).join('') || '<div class="chip-hint">Emails and logged contacts will show up here with their date and time.</div>'}
       </div>
     </div>
     <div class="col">
@@ -594,6 +666,8 @@ function renderDetail() {
           <input id="nc-title" class="input" placeholder="Title">
           <input id="nc-email" class="input" placeholder="Email">
           <input id="nc-phone" class="input" placeholder="Phone">
+          <div class="field span2"><label>Contact cadence — how often to touch base with this person</label>
+            <select id="nc-cadence" class="select">${cadenceOptionsHtml(30)}</select></div>
           <div id="con-form-error" class="form-error span2" style="display:none;"></div>
           <div class="actions">
             <button class="btn-sm-cancel" data-action="toggle-con-form">Cancel</button>
@@ -887,7 +961,6 @@ async function saveAccount() {
       name: $('na-name').value,
       type: $('na-type').value,
       rep: $('na-rep').value,
-      cadence: $('na-cadence').value,
     });
     await refresh();
     go('detail', { selId: account.id });
@@ -901,6 +974,7 @@ async function saveContact() {
       acc: state.selId,
       name: $('nc-name').value, title: $('nc-title').value,
       email: $('nc-email').value, phone: $('nc-phone').value,
+      cadence: $('nc-cadence').value,
     });
     await refresh();
     state.conFormOpen = false;
@@ -913,7 +987,7 @@ async function saveEditContact(id) {
     await api('PATCH', '/api/contacts/' + id, {
       name: $('ec-name').value, title: $('ec-title').value,
       email: $('ec-email').value, phone: $('ec-phone').value,
-      rep: $('ec-rep').value,
+      rep: $('ec-rep').value, cadence: $('ec-cadence').value,
     });
     await refresh();
     state.editConId = null;
@@ -1056,6 +1130,7 @@ document.addEventListener('click', async e => {
     case 'open-account': return openAccount(id);
     case 'open-project': return openProject(id);
     case 'email-contact': return emailContact(id);
+    case 'email-contact-person': return emailContactPerson(id);
     case 'email-rep': return emailRep(id);
 
     case 'toggle-acc-form': state.accFormOpen = !state.accFormOpen; return render();
@@ -1067,12 +1142,13 @@ document.addEventListener('click', async e => {
     case 'cancel-edit-contact': state.editConId = null; return render();
     case 'save-edit-contact': return saveEditContact(id);
 
-    case 'log-contact':
+    case 'log-contact-person':
       try {
-        await api('POST', '/api/accounts/' + id + '/log-contact');
+        const c = state.data.contacts.find(x => x.id === id);
+        await api('POST', '/api/contacts/' + id + '/log-contact');
         await refresh();
         render();
-        toast('Contact logged for ' + accName(id) + ' — next touch resets from today.');
+        toast('Contact logged for ' + (c ? c.name : 'contact') + ' — their next touch resets from today.');
       } catch (err) { toast(err.message); }
       return;
 
@@ -1134,9 +1210,9 @@ document.addEventListener('change', async e => {
         await refresh(); render();
       } catch (err) { toast(err.message); }
       return;
-    case 'rel-cadence':
+    case 'con-cadence': // per-person cadence on the contact card
       try {
-        await api('PATCH', '/api/accounts/' + state.selId, { cadence: el.value });
+        await api('PATCH', '/api/contacts/' + (+el.dataset.id), { cadence: el.value });
         await refresh(); render();
       } catch (err) { toast(err.message); }
       return;
@@ -1181,7 +1257,7 @@ async function backgroundSync() {
       state.screen === 'new' || state.screen === 'account') return;
   try {
     const json = await api('GET', '/api/data');
-    const snap = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs]);
+    const snap = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity]);
     if (snap !== lastSnapshot) {
       lastSnapshot = snap;
       state.data = json;
@@ -1215,7 +1291,7 @@ document.addEventListener('submit', e => {
     state.data = json;
     state.me = json.me;
     state.today = json.today;
-    lastSnapshot = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs]);
+    lastSnapshot = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity]);
     render();
   } catch (e) {
     $('app').innerHTML = '<div class="boot">Could not reach the CRM server. Is it running? (' + esc(e.message) + ')</div>';

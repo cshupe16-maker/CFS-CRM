@@ -104,6 +104,15 @@ function loadDb() {
     if (!u.passHash) u.passHash = hashPassword(DEFAULT_PASSWORD);
     if (u.active === undefined) u.active = true;
   });
+  // cadence moved from accounts to contacts — inherit the account's setting
+  db.contacts.forEach(c => {
+    if (c.cadence === undefined) {
+      const a = db.accounts.find(x => x.id === c.acc);
+      c.cadence = (a && a.cadence) || 30;
+    }
+    if (c.lastContact === undefined) c.lastContact = null;
+  });
+  db.activity = db.activity || [];
   pruneSessions();
   saveDb();
 }
@@ -220,6 +229,7 @@ function getData(user) {
     accounts,
     contacts: db.contacts.filter(c => accIds.has(c.acc)),
     projects: db.projects.filter(p => accIds.has(p.acc)),
+    activity: db.activity.filter(e => accIds.has(e.acc)),
     mfrs: db.mfrs,
     meta: { demo: !!(db.meta && db.meta.demo) },
     today: todayISO(),
@@ -288,6 +298,48 @@ function logContact(user, id) {
   return { account: a };
 }
 
+// Per-account activity trail (emails sent, contacts logged, jobs added).
+// Timestamps are stored in UTC (ISO); the client renders them in Mountain time.
+function logActivity(accId, text, user) {
+  db.activity.push({
+    id: nextId(db.activity), acc: accId,
+    ts: new Date().toISOString(), text, user: user ? user.name : '',
+  });
+  if (db.activity.length > 2000) db.activity = db.activity.slice(-2000);
+}
+
+function emailRepActivity(user, id) {
+  const a = db.accounts.find(x => x.id === id);
+  if (!a) return { notFound: true };
+  if (!canAccessAccount(user, a)) return { forbidden: true };
+  const rep = db.users.find(u => u.id === a.rep);
+  logActivity(a.id, 'Emailed reminder to rep ' + (rep ? rep.name : '(unassigned)'), user);
+  saveDb();
+  return { ok: true };
+}
+
+function emailContactActivity(user, id) {
+  const c = db.contacts.find(x => x.id === id);
+  if (!c) return { notFound: true };
+  const acc = db.accounts.find(a => a.id === c.acc);
+  if (!acc || !canAccessAccount(user, acc)) return { forbidden: true };
+  logActivity(acc.id, 'Emailed ' + c.name + (c.email ? ' (' + c.email + ')' : ''), user);
+  saveDb();
+  return { ok: true };
+}
+
+function logContactPerson(user, id) {
+  const c = db.contacts.find(x => x.id === id);
+  if (!c) return { notFound: true };
+  const acc = db.accounts.find(a => a.id === c.acc);
+  if (!acc || !canAccessAccount(user, acc)) return { forbidden: true };
+  c.lastContact = todayISO();
+  acc.lastContact = todayISO();
+  logActivity(acc.id, 'Logged contact with ' + c.name, user);
+  saveDb();
+  return { contact: c };
+}
+
 function createContact(user, body) {
   const name = str(body.name);
   if (!name) return { error: 'Enter a name.' };
@@ -298,6 +350,7 @@ function createContact(user, body) {
     id: nextId(db.contacts), acc: acc.id, name,
     title: str(body.title), email: str(body.email), phone: str(body.phone),
     rep: db.users.some(u => u.id === +body.rep) ? +body.rep : acc.rep,
+    cadence: CADENCES.includes(+body.cadence) ? +body.cadence : 30,
     primary: !db.contacts.some(c => c.acc === acc.id),
     lastContact: null,
   };
@@ -322,6 +375,10 @@ function patchContact(user, id, body) {
   if (body.rep !== undefined) {
     if (!db.users.some(u => u.id === +body.rep)) return { error: 'Unknown rep.' };
     c.rep = +body.rep;
+  }
+  if (body.cadence !== undefined) {
+    if (!CADENCES.includes(+body.cadence)) return { error: 'Invalid cadence.' };
+    c.cadence = +body.cadence;
   }
   if (body.primary === true) {
     db.contacts.forEach(x => { if (x.acc === c.acc) x.primary = false; });
@@ -373,9 +430,14 @@ function createProject(user, body) {
   if (mfrErr) return { forbidden: mfrErr };
   const project = { id: nextId(db.projects), ...fields };
   db.projects.push(project);
-  // Saving a job also counts as a contact touch on the account
+  // Saving a job also counts as a contact touch — on the chosen contact,
+  // or the account's primary contact if none was picked
   a.lastContact = todayISO();
-  db.contacts.forEach(c => { if (c.acc === a.id && c.primary) c.lastContact = todayISO(); });
+  const touched = project.con
+    ? db.contacts.find(c => c.id === project.con)
+    : db.contacts.find(c => c.acc === a.id && c.primary);
+  if (touched) touched.lastContact = todayISO();
+  logActivity(a.id, 'Logged job “' + project.name + '”', user);
   saveDb();
   return { project };
 }
@@ -536,10 +598,13 @@ async function handleApi(req, res, pathname) {
     if (method === 'POST' && seg.length === 2) return respond(createAccount(user, body));
     if (seg.length === 3 && method === 'PATCH') return respond(patchAccount(user, +seg[2], body));
     if (seg.length === 4 && seg[3] === 'log-contact' && method === 'POST') return respond(logContact(user, +seg[2]));
+    if (seg.length === 4 && seg[3] === 'email-rep' && method === 'POST') return respond(emailRepActivity(user, +seg[2]));
   }
   if (seg[1] === 'contacts') {
     if (method === 'POST' && seg.length === 2) return respond(createContact(user, body));
     if (seg.length === 3 && method === 'PATCH') return respond(patchContact(user, +seg[2], body));
+    if (seg.length === 4 && seg[3] === 'log-contact' && method === 'POST') return respond(logContactPerson(user, +seg[2]));
+    if (seg.length === 4 && seg[3] === 'email-log' && method === 'POST') return respond(emailContactActivity(user, +seg[2]));
   }
   if (seg[1] === 'projects') {
     if (method === 'POST' && seg.length === 2) return respond(createProject(user, body));
@@ -604,6 +669,7 @@ if (process.argv.includes('--seed-demo')) {
   db = JSON.parse(JSON.stringify(demoData));
   db.meta = { demo: true, createdAt: new Date().toISOString() };
   db.sessions = [];
+  db.activity = [];
   db.users.forEach(u => { u.passHash = hashPassword(DEFAULT_PASSWORD); u.active = true; });
   saveDb();
   console.log('Re-seeded demo data.');
