@@ -171,6 +171,8 @@ textarea.input { resize: vertical; line-height: 1.45; padding: 8px 10px; font-si
 .inline-form .btn-sm-cancel { border: 1px solid #cfd6de; background: #fff; color: #565d66; border-radius: 6px; padding: 7px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .inline-form .btn-sm-save { border: none; background: #1d4f8f; color: #fff; border-radius: 6px; padding: 7px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; }
 .inline-form .btn-sm-save:hover { background: #26619f; }
+.btn-sm-danger { border: 1px solid #e4b6b0; background: #fff; color: #b3382c; border-radius: 6px; padding: 7px 12px; font-size: 12.5px; font-weight: 700; cursor: pointer; }
+.btn-sm-danger:hover { background: #f9e7e4; }
 
 /* ===== New account panel ===== */
 .panel-form { background: #fff; border: 1px solid #b9c9de; border-radius: 8px; padding: 18px 20px; margin-bottom: 14px; }

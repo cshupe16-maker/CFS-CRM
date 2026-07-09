@@ -587,9 +587,12 @@ function renderDetail() {
         <div class="field"><label>Contact cadence</label>
           <select id="ec-cadence" class="select">${cadenceOptionsHtml(c.cadence)}</select></div>
         <div id="ec-error" class="form-error span2" style="display:none;"></div>
-        <div class="actions">
-          <button class="btn-sm-cancel" data-action="cancel-edit-contact">Cancel</button>
-          <button class="btn-sm-save" data-action="save-edit-contact" data-id="${c.id}">Save</button>
+        <div class="actions" style="justify-content:space-between;">
+          <button class="btn-sm-danger" data-action="delete-contact" data-id="${c.id}">Delete contact</button>
+          <div style="display:flex;gap:8px;">
+            <button class="btn-sm-cancel" data-action="cancel-edit-contact">Cancel</button>
+            <button class="btn-sm-save" data-action="save-edit-contact" data-id="${c.id}">Save</button>
+          </div>
         </div>
       </div>
     </div>` : (() => {
@@ -643,6 +646,7 @@ function renderDetail() {
           <textarea id="rel-note" class="input" rows="4" data-action="rel-note" placeholder="How and when to reach this account&hellip;">${esc(a.note)}</textarea></div>
         <div class="chip-hint">Contact cadence and &ldquo;Log contact&rdquo; live on each person&rsquo;s card &rarr;</div>
         <button class="btn btn-outline btn-block" data-action="email-rep" data-id="${a.id}" style="font-weight:700;">Email reminder to rep</button>
+        ${isOwner() ? `<button class="btn btn-danger btn-block" data-action="delete-account" data-id="${a.id}">Delete account</button>` : ''}
       </div>
 
       <div class="card rel-card">
@@ -1141,6 +1145,35 @@ document.addEventListener('click', async e => {
     case 'edit-contact': state.editConId = id; state.conFormOpen = false; return render();
     case 'cancel-edit-contact': state.editConId = null; return render();
     case 'save-edit-contact': return saveEditContact(id);
+
+    case 'delete-contact': {
+      const c = state.data.contacts.find(x => x.id === id);
+      if (!c) return;
+      if (!confirm('Delete ' + c.name + '? Their contact info and reminders are removed. Project history stays on the account.')) return;
+      try {
+        await api('DELETE', '/api/contacts/' + id);
+        await refresh();
+        state.editConId = null;
+        render();
+        toast('Deleted contact ' + c.name + '.');
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    case 'delete-account': {
+      const a = accById(id);
+      if (!a) return;
+      const nCon = state.data.contacts.filter(c => c.acc === id).length;
+      const nProj = state.data.projects.filter(p => p.acc === id).length;
+      if (!confirm('Delete ' + a.name + '? This permanently removes the business, its ' +
+        nCon + ' contact(s), ' + nProj + ' project(s), and its activity history. This cannot be undone.')) return;
+      try {
+        await api('DELETE', '/api/accounts/' + id);
+        await refresh();
+        go('accounts');
+        toast('Deleted ' + a.name + ' and all its records.');
+      } catch (err) { toast(err.message); }
+      return;
+    }
 
     case 'log-contact-person':
       try {

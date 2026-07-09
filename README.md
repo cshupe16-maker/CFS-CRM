@@ -37,6 +37,8 @@ Everyone signs in with their **email + password**. Sessions last 30 days; repeat
 |---|:---:|:---:|:---:|
 | See/edit accounts, contacts, projects | own only | all | all |
 | Create accounts | for themselves | any rep | any rep |
+| Delete contacts | own accounts | ✓ | ✓ |
+| Delete accounts (business + all records) | — | ✓ | ✓ |
 | Add manufacturers | — | ✓ | ✓ |
 | Manage team (add/edit/disable, reset passwords) | — | except owners | everyone |
 | Grant the Owner role | — | — | ✓ |

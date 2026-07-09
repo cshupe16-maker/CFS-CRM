@@ -165,6 +165,40 @@ async function main() {
     r = await req(owner.cookie, 'POST', '/api/projects', { acc: ownAcc, name: 'Job Two', status: 'In Progress', mfrs: ['NewBrandX'] });
     check('owner can introduce new manufacturer via job', r.status === 200);
 
+    // ---- deletion ----
+    r = await req(deshawn.cookie, 'POST', '/api/contacts', { acc: ownAcc, name: 'Temp Person', cadence: 30 });
+    const tempCon = r.json.contact.id;
+    r = await req(carla.cookie, 'DELETE', '/api/contacts/' + tempCon);
+    check('other rep cannot delete this contact', r.status === 403);
+    r = await req(deshawn.cookie, 'DELETE', '/api/contacts/' + tempCon);
+    check('rep deletes contact on own account', r.status === 200);
+    r = await req(deshawn.cookie, 'DELETE', '/api/contacts/9999');
+    check('delete missing contact 404', r.status === 404);
+
+    // deleting the primary contact promotes the next one, projects keep history
+    r = await req(deshawn.cookie, 'DELETE', '/api/contacts/' + patId);
+    check('primary contact deleted', r.status === 200);
+    r = await req(deshawn.cookie, 'GET', '/api/data');
+    check('projects lost the person reference but survive',
+      r.json.projects.filter(p => p.acc === ownAcc).every(p => p.con !== patId));
+
+    r = await req(deshawn.cookie, 'DELETE', '/api/accounts/' + ownAcc);
+    check('sales cannot delete an account', r.status === 403);
+    r = await req(owner.cookie, 'POST', '/api/accounts', { name: 'Doomed LLC', type: 'Builder', rep: 3 });
+    const doomed = r.json.account.id;
+    await req(owner.cookie, 'POST', '/api/contacts', { acc: doomed, name: 'Doomed Contact' });
+    await req(owner.cookie, 'POST', '/api/projects', { acc: doomed, name: 'Doomed Job', status: 'In Progress' });
+    r = await req(manager.cookie, 'DELETE', '/api/accounts/' + doomed);
+    check('manager deletes an account', r.status === 200);
+    r = await req(owner.cookie, 'GET', '/api/data');
+    check('account cascade removes contacts/projects/activity',
+      !r.json.accounts.some(a => a.id === doomed) &&
+      !r.json.contacts.some(c => c.acc === doomed) &&
+      !r.json.projects.some(p => p.acc === doomed) &&
+      !r.json.activity.some(e => e.acc === doomed));
+    r = await req(manager.cookie, 'DELETE', '/api/accounts/9999');
+    check('delete missing account 404', r.status === 404);
+
     // ---- manufacturers ----
     r = await req(deshawn.cookie, 'POST', '/api/mfrs', { name: 'SalesBrand' });
     check('sales cannot add manufacturer', r.status === 403);

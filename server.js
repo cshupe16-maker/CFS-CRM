@@ -388,6 +388,37 @@ function patchContact(user, id, body) {
   return { contact: c };
 }
 
+function deleteContact(user, id) {
+  const c = db.contacts.find(x => x.id === id);
+  if (!c) return { notFound: true };
+  const acc = db.accounts.find(a => a.id === c.acc);
+  if (!acc || !canAccessAccount(user, acc)) return { forbidden: true };
+  db.contacts = db.contacts.filter(x => x.id !== id);
+  // projects keep their history, just lose the person reference
+  db.projects.forEach(p => { if (p.con === id) p.con = null; });
+  // if the primary contact was removed, promote the next one
+  if (c.primary) {
+    const next = db.contacts.find(x => x.acc === acc.id);
+    if (next) next.primary = true;
+  }
+  logActivity(acc.id, 'Deleted contact ' + c.name, user);
+  saveDb();
+  return { ok: true };
+}
+
+// Deleting a business wipes its contacts, projects, and activity — managers/owners only
+function deleteAccount(user, id) {
+  if (!isManager(user)) return { forbidden: 'Only managers/owners can delete an account.' };
+  const a = db.accounts.find(x => x.id === id);
+  if (!a) return { notFound: true };
+  db.accounts = db.accounts.filter(x => x.id !== id);
+  db.contacts = db.contacts.filter(c => c.acc !== id);
+  db.projects = db.projects.filter(p => p.acc !== id);
+  db.activity = db.activity.filter(e => e.acc !== id);
+  saveDb();
+  return { ok: true };
+}
+
 function validateProject(body) {
   if (!db.accounts.some(a => a.id === +body.acc)) return 'Select an account.';
   if (!str(body.name)) return 'Enter a project name.';
@@ -597,12 +628,14 @@ async function handleApi(req, res, pathname) {
   if (seg[1] === 'accounts') {
     if (method === 'POST' && seg.length === 2) return respond(createAccount(user, body));
     if (seg.length === 3 && method === 'PATCH') return respond(patchAccount(user, +seg[2], body));
+    if (seg.length === 3 && method === 'DELETE') return respond(deleteAccount(user, +seg[2]));
     if (seg.length === 4 && seg[3] === 'log-contact' && method === 'POST') return respond(logContact(user, +seg[2]));
     if (seg.length === 4 && seg[3] === 'email-rep' && method === 'POST') return respond(emailRepActivity(user, +seg[2]));
   }
   if (seg[1] === 'contacts') {
     if (method === 'POST' && seg.length === 2) return respond(createContact(user, body));
     if (seg.length === 3 && method === 'PATCH') return respond(patchContact(user, +seg[2], body));
+    if (seg.length === 3 && method === 'DELETE') return respond(deleteContact(user, +seg[2]));
     if (seg.length === 4 && seg[3] === 'log-contact' && method === 'POST') return respond(logContactPerson(user, +seg[2]));
     if (seg.length === 4 && seg[3] === 'email-log' && method === 'POST') return respond(emailContactActivity(user, +seg[2]));
   }
