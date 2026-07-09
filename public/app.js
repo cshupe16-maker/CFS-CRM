@@ -434,11 +434,14 @@ function renderReminders() {
 // ----- accounts list -----
 
 function repOptionsHtml(selectedId) {
-  // active sales reps, plus whoever currently holds the assignment (so an
-  // existing selection never disappears from the dropdown)
-  const opts = state.data.users.filter(u =>
-    (u.role === 'Sales' && u.active) || String(u.id) === String(selectedId));
-  return opts.map(u => `<option value="${u.id}" ${String(u.id) === String(selectedId) ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
+  // anyone active on the team can carry accounts — sales reps listed first,
+  // owners/managers after (labeled). Whoever currently holds the assignment
+  // stays in the list even if disabled, so the selection never disappears.
+  const opts = state.data.users
+    .filter(u => u.active || String(u.id) === String(selectedId))
+    .sort((a, b) => (a.role === 'Sales' ? 0 : 1) - (b.role === 'Sales' ? 0 : 1));
+  return opts.map(u =>
+    `<option value="${u.id}" ${String(u.id) === String(selectedId) ? 'selected' : ''}>${esc(u.name)}${u.role !== 'Sales' ? ' (' + u.role + ')' : ''}</option>`).join('');
 }
 
 function cadenceOptionsHtml(selected) {

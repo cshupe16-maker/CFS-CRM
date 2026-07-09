@@ -120,6 +120,12 @@ async function main() {
     r = await req(manager.cookie, 'PATCH', '/api/accounts/2', { note: 'manager can' });
     check('manager edits any account', r.status === 200);
 
+    // owners/managers can themselves be the assigned rep on an account
+    r = await req(owner.cookie, 'POST', '/api/accounts', { name: 'Owner-Led Account', type: 'Builder', rep: 1, cadence: 30 });
+    check('owner can be the assigned rep', r.status === 200 && r.json.account.rep === 1);
+    r = await req(owner.cookie, 'PATCH', '/api/accounts/' + r.json.account.id, { rep: 2 });
+    check('account reassignable to a manager', r.status === 200 && r.json.account.rep === 2);
+
     // ---- contacts & projects on own account ----
     r = await req(deshawn.cookie, 'POST', '/api/contacts', { acc: ownAcc, name: 'Pat Tester', email: 'pat@t.com' });
     check('sales adds contact to own account', r.status === 200 && r.json.contact.primary === true);
