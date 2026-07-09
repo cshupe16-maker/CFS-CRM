@@ -22,6 +22,7 @@ const state = {
   pStatus: 'All',
   pMfr: 'All',
   accFormOpen: false,
+  accEditOpen: false,    // edit-business panel on account detail
   conFormOpen: false,
   editConId: null,
   userFormOpen: false,
@@ -247,7 +248,7 @@ function emailRep(accId) {
 function go(screen, extra) {
   Object.assign(state, {
     screen,
-    accFormOpen: false, conFormOpen: false, editConId: null,
+    accFormOpen: false, accEditOpen: false, conFormOpen: false, editConId: null,
     userFormOpen: false, editUserId: null,
   }, extra || {});
   render();
@@ -625,7 +626,29 @@ function renderDetail() {
   <div class="detail-title">
     <h1>${esc(a.name)}</h1>
     <span class="type-tag">${esc(a.type)}</span>
+    <span class="link-strong" data-action="toggle-acc-edit">${state.accEditOpen ? 'Close' : 'Edit'}</span>
   </div>
+  ${state.accEditOpen ? `
+  <div class="panel-form" style="max-width:720px;">
+    <div class="panel-form-title">Edit business</div>
+    <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px;">
+      <div class="field"><label>Business name *</label>
+        <input id="ea-name" class="input" value="${esc(a.name)}"></div>
+      <div class="field"><label>Type</label>
+        <select id="ea-type" class="select">
+          ${['Builder', 'General Contractor', 'Designer', 'Property Manager', 'Other'].map(t => `<option ${a.type === t ? 'selected' : ''}>${t}</option>`).join('')}
+        </select></div>
+    </div>
+    <div id="ea-error" class="form-error" style="margin-top:10px;display:none;"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:10px;flex-wrap:wrap;">
+      ${isOwner() ? `<button class="btn btn-danger" data-action="delete-account" data-id="${a.id}">Delete this business&hellip;</button>` : '<span></span>'}
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-cancel" data-action="toggle-acc-edit">Cancel</button>
+        <button class="btn btn-primary" data-action="save-acc-edit" data-id="${a.id}" style="padding:9px 18px;">Save changes</button>
+      </div>
+    </div>
+    ${isOwner() ? '<div class="chip-hint" style="margin-top:8px;">Deleting removes the business and all of its contacts, projects, and activity — permanently.</div>' : ''}
+  </div>` : ''}
 
   <div class="kpis" style="margin-bottom:20px;">
     <div class="kpi dark"><div class="kpi-label">Tracked jobs</div><div class="kpi-detail-value">${ps.length}</div></div>
@@ -646,7 +669,6 @@ function renderDetail() {
           <textarea id="rel-note" class="input" rows="4" data-action="rel-note" placeholder="How and when to reach this account&hellip;">${esc(a.note)}</textarea></div>
         <div class="chip-hint">Contact cadence and &ldquo;Log contact&rdquo; live on each person&rsquo;s card &rarr;</div>
         <button class="btn btn-outline btn-block" data-action="email-rep" data-id="${a.id}" style="font-weight:700;">Email reminder to rep</button>
-        ${isOwner() ? `<button class="btn btn-danger btn-block" data-action="delete-account" data-id="${a.id}">Delete account</button>` : ''}
       </div>
 
       <div class="card rel-card">
@@ -1140,6 +1162,17 @@ document.addEventListener('click', async e => {
     case 'toggle-acc-form': state.accFormOpen = !state.accFormOpen; return render();
     case 'save-account': return saveAccount();
 
+    case 'toggle-acc-edit': state.accEditOpen = !state.accEditOpen; return render();
+    case 'save-acc-edit':
+      try {
+        await api('PATCH', '/api/accounts/' + id, { name: $('ea-name').value, type: $('ea-type').value });
+        await refresh();
+        state.accEditOpen = false;
+        render();
+        toast('Business updated.');
+      } catch (err) { showFormError('ea-error', err.message); }
+      return;
+
     case 'toggle-con-form': state.conFormOpen = !state.conFormOpen; return render();
     case 'save-contact': return saveContact();
     case 'edit-contact': state.editConId = id; state.conFormOpen = false; return render();
@@ -1166,6 +1199,7 @@ document.addEventListener('click', async e => {
       const nProj = state.data.projects.filter(p => p.acc === id).length;
       if (!confirm('Delete ' + a.name + '? This permanently removes the business, its ' +
         nCon + ' contact(s), ' + nProj + ' project(s), and its activity history. This cannot be undone.')) return;
+      state.accEditOpen = false;
       try {
         await api('DELETE', '/api/accounts/' + id);
         await refresh();
