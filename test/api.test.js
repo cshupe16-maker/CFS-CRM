@@ -267,6 +267,30 @@ async function main() {
     check('db.json has hashes, not plaintext passwords',
       !raw.includes('mynewpass1') && !raw.includes(DEFAULT_PW) && raw.includes('passHash'));
 
+    // ---- bulk import ----
+    const impRows = [
+      { company: 'Import Co A', type: 'General Contractor', name: 'Alice Imp', title: 'PM', email: 'alice@importa.com', phone: '111', cadence: 30 },
+      { company: 'Import Co A', name: 'Bob Imp', email: 'bob@importa.com' },
+      { company: 'Import Co B', type: 'Builder', name: 'Cara Imp', email: 'cara@importb.com', cadence: 14 },
+      { company: '', name: 'No Company' },       // skipped
+      { company: 'Import Co B', name: 'Dup Email', email: 'CARA@importb.com' }, // dup email, skipped
+    ];
+    r = await req(carla2.cookie, 'POST', '/api/import', { rows: impRows });
+    check('sales cannot bulk import', r.status === 403);
+    r = await req(owner.cookie, 'POST', '/api/import', { rows: impRows, rep: 3 });
+    check('owner bulk import returns summary', r.status === 200 &&
+      r.json.summary.newAccounts === 2 && r.json.summary.newContacts === 3 &&
+      r.json.summary.skippedContacts === 1 && r.json.summary.skippedRows === 1);
+    r = await req(owner.cookie, 'GET', '/api/data');
+    const impA = r.json.accounts.find(a => a.name === 'Import Co A');
+    check('imported account assigned to chosen rep, first contact primary',
+      impA && impA.rep === 3 && r.json.contacts.some(c => c.acc === impA.id && c.name === 'Alice Imp' && c.primary));
+    check('imported contact keeps cadence', r.json.contacts.some(c => c.name === 'Cara Imp' && c.cadence === 14));
+    // re-importing the same rows is idempotent (all skipped)
+    r = await req(owner.cookie, 'POST', '/api/import', { rows: impRows, rep: 3 });
+    check('re-import skips existing businesses and contacts',
+      r.status === 200 && r.json.summary.newAccounts === 0 && r.json.summary.newContacts === 0);
+
     // ---- clear demo (owner only) ----
     r = await req(manager.cookie, 'POST', '/api/admin/clear-demo');
     check('manager cannot clear demo', r.status === 403);

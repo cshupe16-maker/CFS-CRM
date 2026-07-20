@@ -91,7 +91,8 @@ The deploy prints your `https://…run.app` URL. Notes:
 | **Account detail** | Assigned rep, notes (auto-saved), contacts (add/edit) each with their own cadence, due badge, **Log contact** and **Email** buttons, a **Recent activity** trail (emails, touches, jobs — timestamped in Mountain time), plus full project history. |
 | **Projects** | All jobs, filterable by status and manufacturer. |
 | **+ New Project** | Log a job — saving it also logs a contact touch on the account. |
-| **Settings** | (Owners/Managers) Manage the team, the manufacturer tag list, and demo data. |
+| **Settings** | (Owners/Managers) Manage the team, the manufacturer tag list, demo data, and **Import contacts**. |
+| **Import contacts** | (Owners/Managers) Bulk-load businesses and contacts from a CSV — download the template, upload or paste rows, preview, and import. Duplicate businesses (by name) and contacts (by email) are skipped automatically. |
 
 Notes on how it behaves:
 

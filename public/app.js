@@ -28,6 +28,8 @@ const state = {
   userFormOpen: false,
   editUserId: null,
   fMfrs: [],             // manufacturer chips selected in the project form
+  importRows: null,      // parsed rows staged for import
+  importRep: null,       // rep to assign imported businesses to
 };
 
 let toastTimer = null;
@@ -282,7 +284,7 @@ function render() {
   const d = state.data;
   if (!d) return;
   const user = currentUser();
-  if (state.screen === 'settings' && !isOwner()) state.screen = 'dashboard';
+  if ((state.screen === 'settings' || state.screen === 'import') && !isOwner()) state.screen = 'dashboard';
 
   const navItems = [
     { label: 'Dashboard', key: 'dashboard' },
@@ -328,6 +330,7 @@ function renderScreen() {
     case 'projects': return renderProjects();
     case 'project': return renderProject();
     case 'settings': return renderSettings();
+    case 'import': return renderImport();
     case 'account': return renderMyAccount();
     case 'new': return renderProjectForm();
     default: return renderDashboard();
@@ -941,6 +944,12 @@ function renderSettings() {
           </div>
         </div>
 
+        <div class="card">
+          <div class="card-title" style="margin-bottom:4px;">Import contacts</div>
+          <div class="card-sub" style="margin-bottom:12px;">Bulk-load businesses and contacts from a spreadsheet (CSV). Duplicates are skipped automatically.</div>
+          <button class="btn btn-primary" data-action="nav" data-screen="import" style="padding:9px 16px;">Open importer</button>
+        </div>
+
         ${d.meta && d.meta.demo && isOwnerRole() ? `
         <div class="card">
           <div class="card-title" style="margin-bottom:4px;">Demo data</div>
@@ -949,6 +958,127 @@ function renderSettings() {
         </div>` : ''}
       </div>
     </div>
+  </div>`;
+}
+
+// ----- spreadsheet import -----
+
+const IMPORT_COLS = ['company', 'type', 'contact_name', 'title', 'email', 'phone', 'cadence'];
+
+// Minimal RFC-4180 CSV parser (handles quotes, commas and newlines in fields)
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', i = 0, inQ = false;
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  while (i < text.length) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"' && text[i + 1] === '"') { field += '"'; i += 2; continue; }
+      if (ch === '"') { inQ = false; i++; continue; }
+      field += ch; i++; continue;
+    }
+    if (ch === '"') { inQ = true; i++; continue; }
+    if (ch === ',') { row.push(field); field = ''; i++; continue; }
+    if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    field += ch; i++;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(c => c.trim() !== ''));
+}
+
+// Map flexible header names to our fields
+const HEADER_ALIASES = {
+  company: ['company', 'company name', 'business', 'account', 'current company (if changed)'],
+  type: ['type', 'account type', 'suggested type'],
+  contact_name: ['contact_name', 'contact name', 'name', 'full name'],
+  title: ['title', 'role', 'position'],
+  email: ['email', 'e-mail', 'email address'],
+  phone: ['phone', 'mobile', 'office phone', 'cell', 'telephone'],
+  cadence: ['cadence', 'suggested cadence (days)', 'cadence (days)'],
+};
+
+function mapImportRows(matrix) {
+  if (!matrix.length) return { error: 'The file is empty.' };
+  const header = matrix[0].map(h => h.trim().toLowerCase());
+  const idx = {};
+  for (const field in HEADER_ALIASES) {
+    idx[field] = header.findIndex(h => HEADER_ALIASES[field].includes(h));
+  }
+  if (idx.company < 0 || idx.contact_name < 0)
+    return { error: 'Could not find “company” and “contact_name” columns. Use the template header row.' };
+  const rows = [];
+  for (let r = 1; r < matrix.length; r++) {
+    const get = f => idx[f] >= 0 ? (matrix[r][idx[f]] || '').trim() : '';
+    const company = get('company'), name = get('contact_name');
+    if (!company && !name) continue;
+    rows.push({
+      company, type: get('type'), name,
+      title: get('title'), email: get('email'), phone: get('phone'),
+      cadence: get('cadence'),
+    });
+  }
+  return { rows };
+}
+
+function renderImport() {
+  const rows = state.importRows;
+  const reps = state.data.users.filter(u => u.active);
+  const repId = state.importRep != null ? state.importRep : state.me.id;
+
+  let preview = '';
+  if (rows) {
+    const companies = new Set(rows.map(r => r.company.toLowerCase()).filter(Boolean));
+    const existing = new Set(state.data.accounts.map(a => a.name.toLowerCase()));
+    const newCompanies = [...companies].filter(c => !existing.has(c)).length;
+    const withEmail = rows.filter(r => r.email).length;
+    const sample = rows.slice(0, 12);
+    preview = `
+    <div class="card" style="margin-top:14px;">
+      <div class="card-title">Preview</div>
+      <div class="card-sub">${rows.length} contact row(s) across ${companies.size} business(es) — about ${newCompanies} new business(es) will be created, ${state.data.accounts.length ? 'the rest matched to existing ones' : ''}. ${withEmail} have an email. Rows whose email already exists are skipped on import.</div>
+      <div class="field" style="max-width:320px;margin-bottom:12px;">
+        <label>Assign new businesses to</label>
+        <select id="import-rep" class="select" data-action="import-rep">
+          ${reps.map(u => `<option value="${u.id}" ${u.id === repId ? 'selected' : ''}>${esc(u.name)}${u.role !== 'Sales' ? ' (' + u.role + ')' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="gtable" style="grid-template-columns:1.4fr 1fr 1.1fr 1.4fr 1fr 70px;font-size:12.5px;">
+        <div class="th">COMPANY</div><div class="th">CONTACT</div><div class="th">TITLE</div><div class="th">EMAIL</div><div class="th">PHONE</div><div class="th">CAD.</div>
+        ${sample.map(r => `
+          <div class="td strong">${esc(r.company)}</div>
+          <div class="td">${esc(r.name)}</div>
+          <div class="td dim">${esc(r.title)}</div>
+          <div class="td dim">${esc(r.email)}</div>
+          <div class="td dim">${esc(r.phone)}</div>
+          <div class="td dim">${esc(r.cadence)}</div>`).join('')}
+      </div>
+      ${rows.length > 12 ? `<div class="chip-hint" style="margin-top:8px;">…and ${rows.length - 12} more.</div>` : ''}
+      <div id="import-error" class="form-error" style="display:none;margin-top:10px;"></div>
+      <div style="display:flex;gap:10px;margin-top:14px;">
+        <button class="btn btn-cancel" data-action="import-clear">Clear</button>
+        <button class="btn btn-primary" data-action="import-run" style="padding:10px 20px;">Import ${rows.length} contact(s)</button>
+      </div>
+    </div>`;
+  }
+
+  return `
+  <div style="max-width:900px;">
+    <span class="back-link" data-action="nav" data-screen="settings">&larr; Settings</span>
+    <h1 style="margin-bottom:4px;">Import contacts</h1>
+    <p class="page-sub">Load businesses and contacts in bulk from a spreadsheet.</p>
+    <div class="card">
+      <div class="card-title">1. Get your file ready</div>
+      <div class="card-sub">Your spreadsheet needs a header row with at least <b>company</b> and <b>contact_name</b>. Optional columns: <b>type, title, email, phone, cadence</b>. In Excel or Google Sheets, use <b>File → Save As / Download → CSV</b>.</div>
+      <button class="btn btn-outline" data-action="import-template" style="font-weight:700;">Download CSV template</button>
+    </div>
+    <div class="card" style="margin-top:14px;">
+      <div class="card-title">2. Upload the CSV</div>
+      <input type="file" id="import-file" accept=".csv,text/csv" data-action="import-file" style="font-size:13.5px;">
+      <div class="card-sub" style="margin-top:10px;">…or paste rows (including the header) here:</div>
+      <textarea id="import-paste" class="input" rows="4" placeholder="company,type,contact_name,title,email,phone,cadence&#10;Crestway Builders,Builder,Casey Crestway,Owner,casey@crestway.com,(555) 111-2222,30" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+      <button class="btn btn-primary" data-action="import-parse-paste" style="margin-top:10px;padding:8px 16px;">Preview pasted rows</button>
+    </div>
+    ${preview}
   </div>`;
 }
 
@@ -1103,6 +1233,45 @@ async function savePassword() {
   } catch (e) { showFormError('pw-error', e.message); }
 }
 
+// ----- import handlers -----
+
+const IMPORT_TEMPLATE =
+  'company,type,contact_name,title,email,phone,cadence\n' +
+  'Crestway Builders,Builder,Casey Crestway,Owner,casey@crestway.com,(555) 111-2222,30\n' +
+  'Meridian Homes,General Contractor,Dana Whitfield,Purchasing Manager,dana@meridian.com,(555) 207-1613,14\n';
+
+function downloadFile(name, text, mime) {
+  const blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function stageImport(text) {
+  const res = mapImportRows(parseCSV(text));
+  if (res.error) { toast(res.error); return; }
+  if (!res.rows.length) { toast('No data rows found.'); return; }
+  state.importRows = res.rows;
+  state.importRep = state.me.id;
+  render();
+}
+
+async function runImport() {
+  const rows = state.importRows;
+  if (!rows || !rows.length) return;
+  try {
+    const { summary } = await api('POST', '/api/import', { rows, rep: state.importRep });
+    state.importRows = null;
+    await refresh();
+    go('accounts');
+    toast('Imported ' + summary.newContacts + ' contact(s) into ' + summary.newAccounts +
+      ' new business(es).' + (summary.skippedContacts ? ' Skipped ' + summary.skippedContacts + ' duplicate(s).' : ''));
+  } catch (e) { showFormError('import-error', e.message); }
+}
+
 async function loadLoginInfo() {
   try {
     const info = await fetch('/api/login-info').then(r => r.json());
@@ -1243,6 +1412,11 @@ document.addEventListener('click', async e => {
 
     case 'add-mfr-settings': return addManufacturer('s-newmfr', false);
 
+    case 'import-template': return downloadFile('cfs-contacts-template.csv', IMPORT_TEMPLATE, 'text/csv');
+    case 'import-parse-paste': return stageImport($('import-paste').value);
+    case 'import-clear': state.importRows = null; return render();
+    case 'import-run': return runImport();
+
     case 'clear-demo':
       if (!confirm('Clear ALL demo accounts, contacts, and projects? Team members and manufacturers are kept. This cannot be undone.')) return;
       try {
@@ -1290,6 +1464,16 @@ document.addEventListener('change', async e => {
       $('f-con').innerHTML = contactOptionsHtml(accId, prim ? prim.id : '');
       return;
     }
+    case 'import-rep': state.importRep = +el.value; return;
+    case 'import-file': {
+      const file = el.files && el.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => stageImport(String(reader.result));
+      reader.onerror = () => toast('Could not read that file.');
+      reader.readAsText(file);
+      return;
+    }
   }
 });
 
@@ -1321,7 +1505,7 @@ async function backgroundSync() {
   // Don't clobber open forms mid-edit (and don't poll while signed out)
   if (!state.me || state.accFormOpen || state.conFormOpen || state.editConId != null ||
       state.userFormOpen || state.editUserId != null ||
-      state.screen === 'new' || state.screen === 'account') return;
+      state.screen === 'new' || state.screen === 'account' || state.screen === 'import') return;
   try {
     const json = await api('GET', '/api/data');
     const snap = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity]);

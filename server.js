@@ -155,7 +155,7 @@ function readBody(req) {
     let data = '';
     req.on('data', chunk => {
       data += chunk;
-      if (data.length > 1e6) { reject(new Error('Body too large')); req.destroy(); }
+      if (data.length > 8e6) { reject(new Error('Body too large')); req.destroy(); }
     });
     req.on('end', () => {
       if (!data) return resolve({});
@@ -568,6 +568,56 @@ function patchUser(user, id, body) {
   return { user: publicUser(u) };
 }
 
+// Bulk import: rows = [{ company, type, name, title, email, phone, cadence, note }]
+// Groups by company, creates/reuses accounts (by name, case-insensitive),
+// creates contacts (skipping duplicate emails). Managers/owners only.
+function bulkImport(user, body) {
+  if (!isManager(user)) return { forbidden: 'Only managers/owners can import contacts.' };
+  const rows = Array.isArray(body.rows) ? body.rows : null;
+  if (!rows) return { error: 'No rows to import.' };
+  if (rows.length > 10000) return { error: 'Too many rows in one import (max 10,000).' };
+
+  const rep = db.users.some(u => u.id === +body.rep) ? +body.rep : user.id;
+  const accByName = new Map(db.accounts.map(a => [a.name.toLowerCase(), a]));
+  const emailSet = new Set(db.contacts.filter(c => c.email).map(c => c.email.toLowerCase()));
+  let newAccounts = 0, newContacts = 0, skippedContacts = 0, skippedRows = 0;
+
+  for (const row of rows) {
+    const company = str(row.company);
+    const name = str(row.name);
+    if (!company || !name) { skippedRows++; continue; }
+
+    let acc = accByName.get(company.toLowerCase());
+    if (!acc) {
+      acc = {
+        id: nextId(db.accounts), name: company,
+        type: ACCOUNT_TYPES.includes(row.type) ? row.type : 'Other',
+        rep, cadence: 90, lastContact: null, note: str(row.note),
+      };
+      db.accounts.push(acc);
+      accByName.set(company.toLowerCase(), acc);
+      newAccounts++;
+    }
+
+    const email = str(row.email);
+    if (email && emailSet.has(email.toLowerCase())) { skippedContacts++; continue; }
+    const contact = {
+      id: nextId(db.contacts), acc: acc.id, name,
+      title: str(row.title), email, phone: str(row.phone),
+      rep: acc.rep,
+      cadence: CADENCES.includes(+row.cadence) ? +row.cadence : 90,
+      primary: !db.contacts.some(c => c.acc === acc.id),
+      lastContact: null,
+    };
+    db.contacts.push(contact);
+    if (email) emailSet.add(email.toLowerCase());
+    newContacts++;
+  }
+
+  saveDb();
+  return { summary: { newAccounts, newContacts, skippedContacts, skippedRows } };
+}
+
 function clearDemo(user) {
   if (user.role !== 'Owner') return { forbidden: 'Only an owner can clear demo data.' };
   db.accounts = [];
@@ -648,6 +698,7 @@ async function handleApi(req, res, pathname) {
     if (method === 'POST' && seg.length === 2) return respond(createUser(user, body));
     if (seg.length === 3 && method === 'PATCH') return respond(patchUser(user, +seg[2], body));
   }
+  if (pathname === '/api/import' && method === 'POST') return respond(bulkImport(user, body));
   if (pathname === '/api/admin/clear-demo' && method === 'POST') return respond(clearDemo(user));
 
   return notFound(res);
