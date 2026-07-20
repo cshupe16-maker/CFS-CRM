@@ -92,7 +92,8 @@ The deploy prints your `https://…run.app` URL. Notes:
 | **Projects** | All jobs, filterable by status and manufacturer. |
 | **+ New Project** | Log a job — saving it also logs a contact touch on the account. |
 | **Settings** | (Owners/Managers) Manage the team, the manufacturer tag list, demo data, and **Import contacts**. |
-| **Import contacts** | (Owners/Managers) Bulk-load businesses and contacts from a CSV — download the template, upload or paste rows, preview, and import. Duplicate businesses (by name) and contacts (by email) are skipped automatically. |
+| **Import** | (Owners/Managers) Two modes. **Contacts** — bulk-load businesses and contacts from a CSV (columns: `company, type, website, contact_name, title, email, phone, cadence, contact_note`). **Opportunities / signals** — attach scored sales signals to existing businesses by name (columns: `company, signal_type, summary, score, date, source_url`). Download a template for either, preview, import. Duplicate businesses (by name), contacts (by email), and signals (by source URL) are skipped. |
+| **Account detail (extras)** | Businesses can have a **website** (clickable), each contact can carry a **note**, and an **Opportunities** card lists scored signals (capital plans, specs, bids, awards, incumbents) sorted by score with source links. |
 
 Notes on how it behaves:
 

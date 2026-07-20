@@ -30,6 +30,7 @@ const state = {
   fMfrs: [],             // manufacturer chips selected in the project form
   importRows: null,      // parsed rows staged for import
   importRep: null,       // rep to assign imported businesses to
+  importMode: 'contacts',// 'contacts' | 'signals'
 };
 
 let toastTimer = null;
@@ -42,6 +43,10 @@ function esc(v) {
   return String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function websiteHref(url) {
+  return /^https?:\/\//i.test(url) ? url : 'https://' + url;
 }
 
 function toast(msg, ms) {
@@ -571,6 +576,38 @@ function renderAccounts() {
 
 // ----- account detail -----
 
+const SIGNAL_LABEL = { capital: 'Capital', spec: 'Spec', bid: 'Bid', award: 'Award', incumbent: 'Incumbent', general: 'Signal' };
+const SIGNAL_CLS = { capital: 'badge-green', spec: 'badge-blue', bid: 'badge-amber', award: 'badge-blue', incumbent: 'badge-gray', general: 'badge-gray' };
+
+function scoreColor(s) {
+  if (s == null) return '#8a9099';
+  return s >= 70 ? '#0d7a4f' : s >= 40 ? '#8a5a1d' : '#8a9099';
+}
+
+function renderOpportunities(accId) {
+  const ops = (state.data.opportunities || [])
+    .filter(o => o.acc === accId)
+    .sort((a, b) => (b.score == null ? -1 : b.score) - (a.score == null ? -1 : a.score));
+  if (!ops.length) return '';
+  return `
+  <div class="card" style="padding:14px 18px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="font-size:14px;font-weight:700;">Opportunities <span class="muted-inline" style="color:#8a9099;font-weight:400;">&middot; ${ops.length}</span></div>
+    </div>
+    ${ops.map(o => `
+      <div class="opp-row">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span class="badge ${SIGNAL_CLS[o.type] || 'badge-gray'}">${SIGNAL_LABEL[o.type] || o.type}</span>
+          ${o.score != null ? `<span style="font-size:12px;font-weight:700;color:${scoreColor(o.score)};">score ${o.score}</span>` : ''}
+          ${o.date ? `<span style="font-size:12px;color:#8a9099;">${esc(o.date)}</span>` : ''}
+          ${o.url ? `<a href="${esc(websiteHref(o.url))}" target="_blank" rel="noopener" class="link" style="font-size:12px;">source &nearr;</a>` : ''}
+          <span class="link-strong" style="font-size:11.5px;margin-left:auto;color:#b3382c;" data-action="delete-opp" data-id="${o.id}">Remove</span>
+        </div>
+        <div style="font-size:13px;margin-top:3px;">${esc(o.summary)}</div>
+      </div>`).join('')}
+  </div>`;
+}
+
 function renderDetail() {
   const a = accById(state.selId);
   if (!a) return '<div class="empty-note">Account not found.</div>';
@@ -590,6 +627,8 @@ function renderDetail() {
           <select id="ec-rep" class="select">${repOptionsHtml(c.rep != null ? c.rep : a.rep)}</select></div>
         <div class="field"><label>Contact cadence</label>
           <select id="ec-cadence" class="select">${cadenceOptionsHtml(c.cadence)}</select></div>
+        <div class="field span2"><label>Notes</label>
+          <input id="ec-note" class="input" placeholder="Source, role priority, how to reach…" value="${esc(c.note || '')}"></div>
         <div id="ec-error" class="form-error span2" style="display:none;"></div>
         <div class="actions" style="justify-content:space-between;">
           <button class="btn-sm-danger" data-action="delete-contact" data-id="${c.id}">Delete contact</button>
@@ -608,6 +647,7 @@ function renderDetail() {
           <div class="contact-name">${esc(c.name)} <span class="muted-inline">${c.primary ? '&middot; primary' : ''}</span></div>
           <div class="contact-line">${esc(c.title)}</div>
           <div class="contact-line dim">${esc(c.email)}${c.email && c.phone ? ' &middot; ' : ''}${esc(c.phone)}</div>
+          ${c.note ? `<div class="contact-note">${esc(c.note)}</div>` : ''}
           <div class="contact-line dim" style="margin-top:2px;">Last contact <span style="font-weight:600;color:#565d66;">${esc(c.lastContact || '—')}</span> <span class="badge ${d.cls}">${esc(d.text)}</span></div>
           <div class="contact-line" style="margin-top:6px;display:flex;align-items:center;gap:6px;">
             <span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#8a9099;">Cadence</span>
@@ -629,6 +669,7 @@ function renderDetail() {
   <div class="detail-title">
     <h1>${esc(a.name)}</h1>
     <span class="type-tag">${esc(a.type)}</span>
+    ${a.website ? `<a href="${esc(websiteHref(a.website))}" target="_blank" rel="noopener" class="link" style="font-size:13px;">${esc(a.website.replace(/^https?:\/\//, ''))} &nearr;</a>` : ''}
     <span class="link-strong" data-action="toggle-acc-edit">${state.accEditOpen ? 'Close' : 'Edit'}</span>
   </div>
   ${state.accEditOpen ? `
@@ -641,6 +682,8 @@ function renderDetail() {
         <select id="ea-type" class="select">
           ${['Builder', 'General Contractor', 'Designer', 'Property Manager', 'Other'].map(t => `<option ${a.type === t ? 'selected' : ''}>${t}</option>`).join('')}
         </select></div>
+      <div class="field" style="grid-column:1 / 3;"><label>Website</label>
+        <input id="ea-website" class="input" placeholder="https://…" value="${esc(a.website || '')}"></div>
     </div>
     <div id="ea-error" class="form-error" style="margin-top:10px;display:none;"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:10px;flex-wrap:wrap;">
@@ -697,6 +740,7 @@ function renderDetail() {
           <input id="nc-phone" class="input" placeholder="Phone">
           <div class="field span2"><label>Contact cadence — how often to touch base with this person</label>
             <select id="nc-cadence" class="select">${cadenceOptionsHtml(30)}</select></div>
+          <input id="nc-note" class="input span2" placeholder="Notes (optional)">
           <div id="con-form-error" class="form-error span2" style="display:none;"></div>
           <div class="actions">
             <button class="btn-sm-cancel" data-action="toggle-con-form">Cancel</button>
@@ -706,6 +750,8 @@ function renderDetail() {
         ${contacts.length ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">${contacts.map(contactCard).join('')}</div>`
           : emptyNote('No contacts yet — add the people you work with at this account.')}
       </div>
+
+      ${renderOpportunities(a.id)}
 
       <div class="card" style="padding:6px 20px 14px;">
         <div style="font-size:14px;font-weight:700;padding:12px 0 4px;">Project history</div>
@@ -963,8 +1009,6 @@ function renderSettings() {
 
 // ----- spreadsheet import -----
 
-const IMPORT_COLS = ['company', 'type', 'contact_name', 'title', 'email', 'phone', 'cadence'];
-
 // Minimal RFC-4180 CSV parser (handles quotes, commas and newlines in fields)
 function parseCSV(text) {
   const rows = [];
@@ -986,96 +1030,150 @@ function parseCSV(text) {
   return rows.filter(r => r.some(c => c.trim() !== ''));
 }
 
-// Map flexible header names to our fields
+// Map flexible header names to our fields, per import mode
 const HEADER_ALIASES = {
-  company: ['company', 'company name', 'business', 'account', 'current company (if changed)'],
-  type: ['type', 'account type', 'suggested type'],
-  contact_name: ['contact_name', 'contact name', 'name', 'full name'],
-  title: ['title', 'role', 'position'],
-  email: ['email', 'e-mail', 'email address'],
-  phone: ['phone', 'mobile', 'office phone', 'cell', 'telephone'],
-  cadence: ['cadence', 'suggested cadence (days)', 'cadence (days)'],
+  contacts: {
+    company: ['company', 'company name', 'business', 'account', 'district', 'current company (if changed)'],
+    type: ['type', 'account type', 'suggested type'],
+    website: ['website', 'url', 'site'],
+    contact_name: ['contact_name', 'contact name', 'name', 'full name'],
+    title: ['title', 'role', 'position'],
+    email: ['email', 'e-mail', 'email address'],
+    phone: ['phone', 'mobile', 'office phone', 'cell', 'telephone'],
+    cadence: ['cadence', 'suggested cadence (days)', 'cadence (days)'],
+    note: ['contact_note', 'note', 'notes', 'excerpt'],
+  },
+  signals: {
+    company: ['company', 'company name', 'business', 'account', 'district'],
+    type: ['signal_type', 'type', 'doc_type'],
+    summary: ['summary', 'excerpt', 'description', 'signal'],
+    score: ['score', 'opportunity_score', 'rank_score'],
+    date: ['date', 'award_date', 'planned_renovation_date', 'fetched_at'],
+    url: ['source_url', 'url', 'page_url'],
+  },
 };
 
-function mapImportRows(matrix) {
+function mapImportRows(matrix, mode) {
   if (!matrix.length) return { error: 'The file is empty.' };
+  const spec = HEADER_ALIASES[mode];
   const header = matrix[0].map(h => h.trim().toLowerCase());
   const idx = {};
-  for (const field in HEADER_ALIASES) {
-    idx[field] = header.findIndex(h => HEADER_ALIASES[field].includes(h));
-  }
-  if (idx.company < 0 || idx.contact_name < 0)
-    return { error: 'Could not find “company” and “contact_name” columns. Use the template header row.' };
+  for (const field in spec) idx[field] = header.findIndex(h => spec[field].includes(h));
+
+  if (mode === 'contacts' && (idx.company < 0 || idx.contact_name < 0))
+    return { error: 'Need “company” and “contact_name” columns. Use the template header row.' };
+  if (mode === 'signals' && (idx.company < 0 || idx.summary < 0))
+    return { error: 'Need “company” and “summary” columns. Use the signals template header row.' };
+
   const rows = [];
   for (let r = 1; r < matrix.length; r++) {
     const get = f => idx[f] >= 0 ? (matrix[r][idx[f]] || '').trim() : '';
-    const company = get('company'), name = get('contact_name');
-    if (!company && !name) continue;
-    rows.push({
-      company, type: get('type'), name,
-      title: get('title'), email: get('email'), phone: get('phone'),
-      cadence: get('cadence'),
-    });
+    if (mode === 'contacts') {
+      const company = get('company'), name = get('contact_name');
+      if (!company && !name) continue;
+      rows.push({ company, type: get('type'), website: get('website'), name,
+        title: get('title'), email: get('email'), phone: get('phone'),
+        cadence: get('cadence'), contact_note: get('note') });
+    } else {
+      const company = get('company'), summary = get('summary');
+      if (!company || !summary) continue;
+      rows.push({ company, signal_type: get('type'), summary,
+        score: get('score'), date: get('date'), source_url: get('url') });
+    }
   }
   return { rows };
 }
 
 function renderImport() {
   const rows = state.importRows;
+  const mode = state.importMode;
   const reps = state.data.users.filter(u => u.active);
   const repId = state.importRep != null ? state.importRep : state.me.id;
+  const isSig = mode === 'signals';
 
   let preview = '';
   if (rows) {
-    const companies = new Set(rows.map(r => r.company.toLowerCase()).filter(Boolean));
     const existing = new Set(state.data.accounts.map(a => a.name.toLowerCase()));
-    const newCompanies = [...companies].filter(c => !existing.has(c)).length;
-    const withEmail = rows.filter(r => r.email).length;
     const sample = rows.slice(0, 12);
-    preview = `
-    <div class="card" style="margin-top:14px;">
-      <div class="card-title">Preview</div>
-      <div class="card-sub">${rows.length} contact row(s) across ${companies.size} business(es) — about ${newCompanies} new business(es) will be created, ${state.data.accounts.length ? 'the rest matched to existing ones' : ''}. ${withEmail} have an email. Rows whose email already exists are skipped on import.</div>
-      <div class="field" style="max-width:320px;margin-bottom:12px;">
-        <label>Assign new businesses to</label>
-        <select id="import-rep" class="select" data-action="import-rep">
-          ${reps.map(u => `<option value="${u.id}" ${u.id === repId ? 'selected' : ''}>${esc(u.name)}${u.role !== 'Sales' ? ' (' + u.role + ')' : ''}</option>`).join('')}
-        </select>
-      </div>
-      <div class="gtable" style="grid-template-columns:1.4fr 1fr 1.1fr 1.4fr 1fr 70px;font-size:12.5px;">
-        <div class="th">COMPANY</div><div class="th">CONTACT</div><div class="th">TITLE</div><div class="th">EMAIL</div><div class="th">PHONE</div><div class="th">CAD.</div>
-        ${sample.map(r => `
-          <div class="td strong">${esc(r.company)}</div>
-          <div class="td">${esc(r.name)}</div>
-          <div class="td dim">${esc(r.title)}</div>
-          <div class="td dim">${esc(r.email)}</div>
-          <div class="td dim">${esc(r.phone)}</div>
-          <div class="td dim">${esc(r.cadence)}</div>`).join('')}
-      </div>
-      ${rows.length > 12 ? `<div class="chip-hint" style="margin-top:8px;">…and ${rows.length - 12} more.</div>` : ''}
-      <div id="import-error" class="form-error" style="display:none;margin-top:10px;"></div>
-      <div style="display:flex;gap:10px;margin-top:14px;">
-        <button class="btn btn-cancel" data-action="import-clear">Clear</button>
-        <button class="btn btn-primary" data-action="import-run" style="padding:10px 20px;">Import ${rows.length} contact(s)</button>
-      </div>
-    </div>`;
+    if (isSig) {
+      const matched = rows.filter(r => existing.has(r.company.toLowerCase())).length;
+      preview = `
+      <div class="card" style="margin-top:14px;">
+        <div class="card-title">Preview</div>
+        <div class="card-sub">${rows.length} signal row(s). ${matched} match an existing business by name; ${rows.length - matched} have no matching business yet and will be skipped (import their contacts first). Duplicate signals (same source URL) are skipped.</div>
+        <div class="gtable" style="grid-template-columns:1.3fr 90px 60px 90px 2fr;font-size:12.5px;">
+          <div class="th">COMPANY</div><div class="th">TYPE</div><div class="th">SCORE</div><div class="th">DATE</div><div class="th">SUMMARY</div>
+          ${sample.map(r => `
+            <div class="td strong">${esc(r.company)}${existing.has(r.company.toLowerCase()) ? '' : ' <span class="badge badge-red" style="font-size:10px;">no match</span>'}</div>
+            <div class="td dim">${esc(r.signal_type)}</div>
+            <div class="td dim">${esc(r.score)}</div>
+            <div class="td dim">${esc(r.date)}</div>
+            <div class="td dim">${esc(r.summary)}</div>`).join('')}
+        </div>
+        ${rows.length > 12 ? `<div class="chip-hint" style="margin-top:8px;">…and ${rows.length - 12} more.</div>` : ''}
+        <div id="import-error" class="form-error" style="display:none;margin-top:10px;"></div>
+        <div style="display:flex;gap:10px;margin-top:14px;">
+          <button class="btn btn-cancel" data-action="import-clear">Clear</button>
+          <button class="btn btn-primary" data-action="import-run" style="padding:10px 20px;">Import ${rows.length} signal(s)</button>
+        </div>
+      </div>`;
+    } else {
+      const companies = new Set(rows.map(r => r.company.toLowerCase()).filter(Boolean));
+      const newCompanies = [...companies].filter(c => !existing.has(c)).length;
+      const withEmail = rows.filter(r => r.email).length;
+      preview = `
+      <div class="card" style="margin-top:14px;">
+        <div class="card-title">Preview</div>
+        <div class="card-sub">${rows.length} contact row(s) across ${companies.size} business(es) — about ${newCompanies} new business(es) will be created. ${withEmail} have an email. Rows whose email already exists are skipped.</div>
+        <div class="field" style="max-width:320px;margin-bottom:12px;">
+          <label>Assign new businesses to</label>
+          <select id="import-rep" class="select" data-action="import-rep">
+            ${reps.map(u => `<option value="${u.id}" ${u.id === repId ? 'selected' : ''}>${esc(u.name)}${u.role !== 'Sales' ? ' (' + u.role + ')' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div class="gtable" style="grid-template-columns:1.4fr 1fr 1.1fr 1.4fr 1fr 60px;font-size:12.5px;">
+          <div class="th">COMPANY</div><div class="th">CONTACT</div><div class="th">TITLE</div><div class="th">EMAIL</div><div class="th">PHONE</div><div class="th">CAD.</div>
+          ${sample.map(r => `
+            <div class="td strong">${esc(r.company)}</div>
+            <div class="td">${esc(r.name)}</div>
+            <div class="td dim">${esc(r.title)}</div>
+            <div class="td dim">${esc(r.email)}</div>
+            <div class="td dim">${esc(r.phone)}</div>
+            <div class="td dim">${esc(r.cadence)}</div>`).join('')}
+        </div>
+        ${rows.length > 12 ? `<div class="chip-hint" style="margin-top:8px;">…and ${rows.length - 12} more.</div>` : ''}
+        <div id="import-error" class="form-error" style="display:none;margin-top:10px;"></div>
+        <div style="display:flex;gap:10px;margin-top:14px;">
+          <button class="btn btn-cancel" data-action="import-clear">Clear</button>
+          <button class="btn btn-primary" data-action="import-run" style="padding:10px 20px;">Import ${rows.length} contact(s)</button>
+        </div>
+      </div>`;
+    }
   }
+
+  const tab = (m, label) => `<button class="import-tab ${mode === m ? 'active' : ''}" data-action="import-mode" data-mode="${m}">${label}</button>`;
+  const placeholder = isSig
+    ? 'company,signal_type,summary,score,date,source_url&#10;Davis School District,capital,2027 carpet replacement — 8 buildings,82,2027-06-01,https://…'
+    : 'company,type,website,contact_name,title,email,phone,cadence,contact_note&#10;Davis School District,Other,https://davis.k12.ut.us,Jane Doe,Facilities Director,jane@davis.k12.ut.us,(801) 555-0100,30,Rank 1 · prefers email';
 
   return `
   <div style="max-width:900px;">
     <span class="back-link" data-action="nav" data-screen="settings">&larr; Settings</span>
-    <h1 style="margin-bottom:4px;">Import contacts</h1>
-    <p class="page-sub">Load businesses and contacts in bulk from a spreadsheet.</p>
+    <h1 style="margin-bottom:4px;">Import</h1>
+    <p class="page-sub">Bulk-load from a spreadsheet (CSV).</p>
+    <div class="import-tabs">${tab('contacts', 'Contacts')}${tab('signals', 'Opportunities / signals')}</div>
     <div class="card">
       <div class="card-title">1. Get your file ready</div>
-      <div class="card-sub">Your spreadsheet needs a header row with at least <b>company</b> and <b>contact_name</b>. Optional columns: <b>type, title, email, phone, cadence</b>. In Excel or Google Sheets, use <b>File → Save As / Download → CSV</b>.</div>
-      <button class="btn btn-outline" data-action="import-template" style="font-weight:700;">Download CSV template</button>
+      <div class="card-sub">${isSig
+        ? 'Header row needs at least <b>company</b> and <b>summary</b>. Optional: <b>signal_type</b> (capital / spec / bid / award / incumbent), <b>score</b> (0–100), <b>date</b>, <b>source_url</b>. Signals attach to a business by matching the <b>company</b> name — import contacts first.'
+        : 'Header row needs at least <b>company</b> and <b>contact_name</b>. Optional: <b>type, website, title, email, phone, cadence, contact_note</b>. In Excel/Sheets use <b>File → Save As / Download → CSV</b>.'}</div>
+      <button class="btn btn-outline" data-action="import-template" style="font-weight:700;">Download ${isSig ? 'signals' : 'contacts'} template</button>
     </div>
     <div class="card" style="margin-top:14px;">
       <div class="card-title">2. Upload the CSV</div>
       <input type="file" id="import-file" accept=".csv,text/csv" data-action="import-file" style="font-size:13.5px;">
       <div class="card-sub" style="margin-top:10px;">…or paste rows (including the header) here:</div>
-      <textarea id="import-paste" class="input" rows="4" placeholder="company,type,contact_name,title,email,phone,cadence&#10;Crestway Builders,Builder,Casey Crestway,Owner,casey@crestway.com,(555) 111-2222,30" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+      <textarea id="import-paste" class="input" rows="4" placeholder="${placeholder}" style="width:100%;font-family:monospace;font-size:12px;"></textarea>
       <button class="btn btn-primary" data-action="import-parse-paste" style="margin-top:10px;padding:8px 16px;">Preview pasted rows</button>
     </div>
     ${preview}
@@ -1130,7 +1228,7 @@ async function saveContact() {
       acc: state.selId,
       name: $('nc-name').value, title: $('nc-title').value,
       email: $('nc-email').value, phone: $('nc-phone').value,
-      cadence: $('nc-cadence').value,
+      cadence: $('nc-cadence').value, note: $('nc-note').value,
     });
     await refresh();
     state.conFormOpen = false;
@@ -1143,7 +1241,7 @@ async function saveEditContact(id) {
     await api('PATCH', '/api/contacts/' + id, {
       name: $('ec-name').value, title: $('ec-title').value,
       email: $('ec-email').value, phone: $('ec-phone').value,
-      rep: $('ec-rep').value, cadence: $('ec-cadence').value,
+      rep: $('ec-rep').value, cadence: $('ec-cadence').value, note: $('ec-note').value,
     });
     await refresh();
     state.editConId = null;
@@ -1235,10 +1333,16 @@ async function savePassword() {
 
 // ----- import handlers -----
 
-const IMPORT_TEMPLATE =
-  'company,type,contact_name,title,email,phone,cadence\n' +
-  'Crestway Builders,Builder,Casey Crestway,Owner,casey@crestway.com,(555) 111-2222,30\n' +
-  'Meridian Homes,General Contractor,Dana Whitfield,Purchasing Manager,dana@meridian.com,(555) 207-1613,14\n';
+const IMPORT_TEMPLATES = {
+  contacts:
+    'company,type,website,contact_name,title,email,phone,cadence,contact_note\n' +
+    'Davis School District,Other,https://davis.k12.ut.us,Jane Doe,Facilities Director,jane@davis.k12.ut.us,(801) 555-0100,30,Rank 1 · prefers email\n' +
+    'Davis School District,Other,https://davis.k12.ut.us,Mark Roe,Purchasing Manager,mark@davis.k12.ut.us,(801) 555-0101,90,\n',
+  signals:
+    'company,signal_type,summary,score,date,source_url\n' +
+    'Davis School District,capital,2027 carpet replacement across 8 buildings,82,2027-06-01,https://davis.k12.ut.us/capital.pdf\n' +
+    'Davis School District,spec,Div 09 68 00 — approved: Patcraft, Mohawk (approved-equal),64,,https://davis.k12.ut.us/specs.pdf\n',
+};
 
 function downloadFile(name, text, mime) {
   const blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
@@ -1251,7 +1355,7 @@ function downloadFile(name, text, mime) {
 }
 
 function stageImport(text) {
-  const res = mapImportRows(parseCSV(text));
+  const res = mapImportRows(parseCSV(text), state.importMode);
   if (res.error) { toast(res.error); return; }
   if (!res.rows.length) { toast('No data rows found.'); return; }
   state.importRows = res.rows;
@@ -1263,12 +1367,23 @@ async function runImport() {
   const rows = state.importRows;
   if (!rows || !rows.length) return;
   try {
-    const { summary } = await api('POST', '/api/import', { rows, rep: state.importRep });
-    state.importRows = null;
-    await refresh();
-    go('accounts');
-    toast('Imported ' + summary.newContacts + ' contact(s) into ' + summary.newAccounts +
-      ' new business(es).' + (summary.skippedContacts ? ' Skipped ' + summary.skippedContacts + ' duplicate(s).' : ''));
+    if (state.importMode === 'signals') {
+      const { summary } = await api('POST', '/api/import-signals', { rows });
+      state.importRows = null;
+      await refresh();
+      render();
+      let msg = 'Added ' + summary.added + ' opportunity signal(s).';
+      if (summary.dupes) msg += ' Skipped ' + summary.dupes + ' duplicate(s).';
+      if (summary.unmatched) msg += ' ' + summary.unmatched + ' had no matching business.';
+      toast(msg, 7000);
+    } else {
+      const { summary } = await api('POST', '/api/import', { rows, rep: state.importRep });
+      state.importRows = null;
+      await refresh();
+      go('accounts');
+      toast('Imported ' + summary.newContacts + ' contact(s) into ' + summary.newAccounts +
+        ' new business(es).' + (summary.skippedContacts ? ' Skipped ' + summary.skippedContacts + ' duplicate(s).' : ''));
+    }
   } catch (e) { showFormError('import-error', e.message); }
 }
 
@@ -1334,7 +1449,7 @@ document.addEventListener('click', async e => {
     case 'toggle-acc-edit': state.accEditOpen = !state.accEditOpen; return render();
     case 'save-acc-edit':
       try {
-        await api('PATCH', '/api/accounts/' + id, { name: $('ea-name').value, type: $('ea-type').value });
+        await api('PATCH', '/api/accounts/' + id, { name: $('ea-name').value, type: $('ea-type').value, website: $('ea-website').value });
         await refresh();
         state.accEditOpen = false;
         render();
@@ -1358,6 +1473,15 @@ document.addEventListener('click', async e => {
         state.editConId = null;
         render();
         toast('Deleted contact ' + c.name + '.');
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    case 'delete-opp': {
+      try {
+        await api('DELETE', '/api/opportunities/' + id);
+        await refresh();
+        render();
+        toast('Opportunity removed.');
       } catch (err) { toast(err.message); }
       return;
     }
@@ -1412,7 +1536,9 @@ document.addEventListener('click', async e => {
 
     case 'add-mfr-settings': return addManufacturer('s-newmfr', false);
 
-    case 'import-template': return downloadFile('cfs-contacts-template.csv', IMPORT_TEMPLATE, 'text/csv');
+    case 'import-mode': state.importMode = el.dataset.mode; state.importRows = null; return render();
+    case 'import-template':
+      return downloadFile('cfs-' + state.importMode + '-template.csv', IMPORT_TEMPLATES[state.importMode], 'text/csv');
     case 'import-parse-paste': return stageImport($('import-paste').value);
     case 'import-clear': state.importRows = null; return render();
     case 'import-run': return runImport();
@@ -1508,7 +1634,7 @@ async function backgroundSync() {
       state.screen === 'new' || state.screen === 'account' || state.screen === 'import') return;
   try {
     const json = await api('GET', '/api/data');
-    const snap = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity]);
+    const snap = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity, json.opportunities]);
     if (snap !== lastSnapshot) {
       lastSnapshot = snap;
       state.data = json;
@@ -1542,7 +1668,7 @@ document.addEventListener('submit', e => {
     state.data = json;
     state.me = json.me;
     state.today = json.today;
-    lastSnapshot = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity]);
+    lastSnapshot = JSON.stringify([json.users, json.accounts, json.contacts, json.projects, json.mfrs, json.activity, json.opportunities]);
     render();
   } catch (e) {
     $('app').innerHTML = '<div class="boot">Could not reach the CRM server. Is it running? (' + esc(e.message) + ')</div>';

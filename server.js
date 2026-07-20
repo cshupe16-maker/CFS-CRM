@@ -111,8 +111,11 @@ function loadDb() {
       c.cadence = (a && a.cadence) || 30;
     }
     if (c.lastContact === undefined) c.lastContact = null;
+    if (c.note === undefined) c.note = '';
   });
+  db.accounts.forEach(a => { if (a.website === undefined) a.website = ''; });
   db.activity = db.activity || [];
+  db.opportunities = db.opportunities || [];
   pruneSessions();
   saveDb();
 }
@@ -230,6 +233,7 @@ function getData(user) {
     contacts: db.contacts.filter(c => accIds.has(c.acc)),
     projects: db.projects.filter(p => accIds.has(p.acc)),
     activity: db.activity.filter(e => accIds.has(e.acc)),
+    opportunities: db.opportunities.filter(o => accIds.has(o.acc)),
     mfrs: db.mfrs,
     meta: { demo: !!(db.meta && db.meta.demo) },
     today: todayISO(),
@@ -252,7 +256,7 @@ function createAccount(user, body) {
   const cadence = CADENCES.includes(+body.cadence) ? +body.cadence : 30;
   const account = {
     id: nextId(db.accounts), name, type, rep, cadence,
-    lastContact: todayISO(), note: str(body.note),
+    lastContact: todayISO(), note: str(body.note), website: str(body.website),
   };
   db.accounts.push(account);
   saveDb();
@@ -280,6 +284,7 @@ function patchAccount(user, id, body) {
     a.cadence = +body.cadence;
   }
   if (body.note !== undefined) a.note = str(body.note);
+  if (body.website !== undefined) a.website = str(body.website);
   if (body.lastContact !== undefined) {
     if (!isDate(body.lastContact)) return { error: 'Invalid date.' };
     a.lastContact = body.lastContact;
@@ -351,6 +356,7 @@ function createContact(user, body) {
     title: str(body.title), email: str(body.email), phone: str(body.phone),
     rep: db.users.some(u => u.id === +body.rep) ? +body.rep : acc.rep,
     cadence: CADENCES.includes(+body.cadence) ? +body.cadence : 30,
+    note: str(body.note),
     primary: !db.contacts.some(c => c.acc === acc.id),
     lastContact: null,
   };
@@ -372,6 +378,7 @@ function patchContact(user, id, body) {
   if (body.title !== undefined) c.title = str(body.title);
   if (body.email !== undefined) c.email = str(body.email);
   if (body.phone !== undefined) c.phone = str(body.phone);
+  if (body.note !== undefined) c.note = str(body.note);
   if (body.rep !== undefined) {
     if (!db.users.some(u => u.id === +body.rep)) return { error: 'Unknown rep.' };
     c.rep = +body.rep;
@@ -592,11 +599,13 @@ function bulkImport(user, body) {
       acc = {
         id: nextId(db.accounts), name: company,
         type: ACCOUNT_TYPES.includes(row.type) ? row.type : 'Other',
-        rep, cadence: 90, lastContact: null, note: str(row.note),
+        rep, cadence: 90, lastContact: null, note: str(row.note), website: str(row.website),
       };
       db.accounts.push(acc);
       accByName.set(company.toLowerCase(), acc);
       newAccounts++;
+    } else if (!acc.website && str(row.website)) {
+      acc.website = str(row.website); // backfill website onto an existing account
     }
 
     const email = str(row.email);
@@ -606,6 +615,7 @@ function bulkImport(user, body) {
       title: str(row.title), email, phone: str(row.phone),
       rep: acc.rep,
       cadence: CADENCES.includes(+row.cadence) ? +row.cadence : 90,
+      note: str(row.note_contact || row.contact_note),
       primary: !db.contacts.some(c => c.acc === acc.id),
       lastContact: null,
     };
@@ -616,6 +626,55 @@ function bulkImport(user, body) {
 
   saveDb();
   return { summary: { newAccounts, newContacts, skippedContacts, skippedRows } };
+}
+
+const SIGNAL_TYPES = ['capital', 'spec', 'bid', 'award', 'incumbent', 'general'];
+
+// Import opportunity/signal rows, matched to existing accounts by company name.
+// rows = [{ company, type|signal_type, summary, score, date, url|source_url }]
+function importSignals(user, body) {
+  if (!isManager(user)) return { forbidden: 'Only managers/owners can import signals.' };
+  const rows = Array.isArray(body.rows) ? body.rows : null;
+  if (!rows) return { error: 'No rows to import.' };
+  if (rows.length > 20000) return { error: 'Too many rows in one import (max 20,000).' };
+
+  const accByName = new Map(db.accounts.map(a => [a.name.toLowerCase(), a]));
+  const seen = new Set(db.opportunities.map(o => o.acc + '|' + (o.url || o.summary)));
+  let added = 0, dupes = 0, unmatched = 0;
+  const unmatchedCompanies = new Set();
+
+  for (const row of rows) {
+    const company = str(row.company);
+    const summary = str(row.summary);
+    if (!company || !summary) { unmatched += (!company ? 1 : 0); continue; }
+    const acc = accByName.get(company.toLowerCase());
+    if (!acc) { unmatched++; unmatchedCompanies.add(company); continue; }
+    const type = SIGNAL_TYPES.includes(String(row.type || row.signal_type).toLowerCase())
+      ? String(row.type || row.signal_type).toLowerCase() : 'general';
+    const url = str(row.url || row.source_url);
+    const key = acc.id + '|' + (url || summary);
+    if (seen.has(key)) { dupes++; continue; }
+    let score = parseInt(row.score, 10);
+    score = isNaN(score) ? null : Math.max(0, Math.min(100, score));
+    db.opportunities.push({
+      id: nextId(db.opportunities), acc: acc.id, type, summary,
+      score, date: isDate(row.date) ? row.date : '', url,
+    });
+    seen.add(key);
+    added++;
+  }
+  saveDb();
+  return { summary: { added, dupes, unmatched, unmatchedCompanies: [...unmatchedCompanies].slice(0, 25) } };
+}
+
+function deleteOpportunity(user, id) {
+  const o = db.opportunities.find(x => x.id === id);
+  if (!o) return { notFound: true };
+  const acc = db.accounts.find(a => a.id === o.acc);
+  if (!acc || !canAccessAccount(user, acc)) return { forbidden: true };
+  db.opportunities = db.opportunities.filter(x => x.id !== id);
+  saveDb();
+  return { ok: true };
 }
 
 function clearDemo(user) {
@@ -699,6 +758,9 @@ async function handleApi(req, res, pathname) {
     if (seg.length === 3 && method === 'PATCH') return respond(patchUser(user, +seg[2], body));
   }
   if (pathname === '/api/import' && method === 'POST') return respond(bulkImport(user, body));
+  if (pathname === '/api/import-signals' && method === 'POST') return respond(importSignals(user, body));
+  if (seg[1] === 'opportunities' && seg.length === 3 && method === 'DELETE')
+    return respond(deleteOpportunity(user, +seg[2]));
   if (pathname === '/api/admin/clear-demo' && method === 'POST') return respond(clearDemo(user));
 
   return notFound(res);
@@ -754,6 +816,9 @@ if (process.argv.includes('--seed-demo')) {
   db.meta = { demo: true, createdAt: new Date().toISOString() };
   db.sessions = [];
   db.activity = [];
+  db.opportunities = [];
+  db.accounts.forEach(a => { if (a.website === undefined) a.website = ''; });
+  db.contacts.forEach(c => { if (c.note === undefined) c.note = ''; });
   db.users.forEach(u => { u.passHash = hashPassword(DEFAULT_PASSWORD); u.active = true; });
   saveDb();
   console.log('Re-seeded demo data.');

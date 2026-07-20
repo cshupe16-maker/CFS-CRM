@@ -291,6 +291,54 @@ async function main() {
     check('re-import skips existing businesses and contacts',
       r.status === 200 && r.json.summary.newAccounts === 0 && r.json.summary.newContacts === 0);
 
+    // ---- website + contact notes ----
+    r = await req(owner.cookie, 'PATCH', '/api/accounts/' + impA.id, { website: 'davis.k12.ut.us' });
+    check('account website saved', r.status === 200 && r.json.account.website === 'davis.k12.ut.us');
+    r = await req(owner.cookie, 'POST', '/api/contacts', { acc: impA.id, name: 'Noted Person', note: 'Rank 1 · prefers email', cadence: 30 });
+    check('contact note saved', r.status === 200 && r.json.contact.note === 'Rank 1 · prefers email');
+
+    // ---- contacts import carries website + contact_note ----
+    r = await req(owner.cookie, 'POST', '/api/import', { rows: [
+      { company: 'Nebo School District', type: 'Other', website: 'nebo.edu', name: 'Fac Director', title: 'Facilities Director', email: 'fd@nebo.edu', cadence: 30, contact_note: 'Rank 1' },
+    ], rep: 2 });
+    check('contacts import created district', r.status === 200 && r.json.summary.newAccounts === 1);
+    r = await req(owner.cookie, 'GET', '/api/data');
+    const nebo = r.json.accounts.find(a => a.name === 'Nebo School District');
+    check('imported website + contact note landed',
+      nebo && nebo.website === 'nebo.edu' && r.json.contacts.some(c => c.acc === nebo.id && c.note === 'Rank 1'));
+
+    // ---- signals import ----
+    const sigRows = [
+      { company: 'Nebo School District', signal_type: 'capital', summary: 'Gym VCT replacement 2027', score: '88', date: '2027-05-01', source_url: 'https://nebo.edu/cap.pdf' },
+      { company: 'Nebo School District', signal_type: 'spec', summary: 'Div 09 approved: Patcraft, Mohawk', score: '60', source_url: 'https://nebo.edu/spec.pdf' },
+      { company: 'Ghost District', signal_type: 'bid', summary: 'no matching account', score: '50' },
+      { company: 'Nebo School District', signal_type: 'nonsense', summary: 'clamps type + score', score: '999' },
+    ];
+    r = await req(carla2.cookie, 'POST', '/api/import-signals', { rows: sigRows });
+    check('sales cannot import signals', r.status === 403);
+    r = await req(owner.cookie, 'POST', '/api/import-signals', { rows: sigRows });
+    check('signals import: 3 added, 1 unmatched', r.status === 200 &&
+      r.json.summary.added === 3 && r.json.summary.unmatched === 1 &&
+      r.json.summary.unmatchedCompanies.includes('Ghost District'));
+    r = await req(owner.cookie, 'GET', '/api/data');
+    const nebOps = r.json.opportunities.filter(o => o.acc === nebo.id);
+    check('opportunities attached with clamped score + normalized type', nebOps.length === 3 &&
+      nebOps.some(o => o.score === 88 && o.type === 'capital') &&
+      nebOps.some(o => o.score === 100 && o.type === 'general'));
+    // re-import is idempotent by source url
+    r = await req(owner.cookie, 'POST', '/api/import-signals', { rows: sigRows });
+    check('signals re-import skips duplicates', r.status === 200 && r.json.summary.added === 0 && r.json.summary.dupes >= 2);
+
+    // sales rep can't see another rep's opportunities
+    r = await req(carla2.cookie, 'GET', '/api/data');
+    check('sales rep sees only own opportunities', r.json.opportunities.every(o => r.json.accounts.some(a => a.id === o.acc)));
+
+    // delete opportunity
+    r = await req(owner.cookie, 'DELETE', '/api/opportunities/' + nebOps[0].id);
+    check('delete opportunity', r.status === 200);
+    r = await req(owner.cookie, 'GET', '/api/data');
+    check('opportunity removed', !r.json.opportunities.some(o => o.id === nebOps[0].id));
+
     // ---- clear demo (owner only) ----
     r = await req(manager.cookie, 'POST', '/api/admin/clear-demo');
     check('manager cannot clear demo', r.status === 403);
